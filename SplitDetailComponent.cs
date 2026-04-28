@@ -824,9 +824,14 @@ namespace LiveSplit.UI.Components
             string d1Text = _pr_delta1;
             string d2Text = onlyOne ? string.Empty : _pr_delta2;
 
-            // Total space: middle width minus separator (and gaps around it)
+            // Keep a small safety gap before the right-side time column.
+            // Deltas must never touch or draw underneath the time.
+            const float RightTimeSafeGap = 3f;
+            float usableMidW = Math.Max(0f, midW - RightTimeSafeGap);
+
+            // Total space: usable middle width minus separator/gaps.
             float gapTotal = hasSep && !onlyOne ? (sepW + deltaGap * 2f) : (onlyOne ? 0f : deltaGap);
-            float available = Math.Max(0f, midW - gapTotal);
+            float available = Math.Max(0f, usableMidW - gapTotal);
 
             float d1NaturalW = string.IsNullOrEmpty(d1Text)
                 ? 0f : g.MeasureString(d1Text, font).Width + 1f;
@@ -838,9 +843,10 @@ namespace LiveSplit.UI.Components
             if (onlyOne)
             {
                 // Only delta1 (or whichever is non-empty)
-                d1W = Math.Min(d1NaturalW, midW);
+                d1W = Math.Min(d1NaturalW, usableMidW);
                 d2W = 0f;
             }
+        
             else if (d1NaturalW + d2NaturalW <= available)
             {
                 // Best case: both fit
@@ -1265,30 +1271,46 @@ namespace LiveSplit.UI.Components
                 // (never return partial forms like "+3:" or "+3:5")
                 return string.Empty;
             }
-            else
+    else
+    {
+        // ── Decimal/seconds format (S, S.f, S.ff, S.fff) ──
+        // Full text was already tested above. Now reduce decimal precision gradually:
+        // +57.530 → +57.53 → +57.5 → +57
+        // Only after that do we shorten whole digits.
+        int dot = body.IndexOf('.');
+        string whole = dot > 0 ? body.Substring(0, dot) : body;
+        string decimals = dot > 0 ? body.Substring(dot + 1) : string.Empty;
+
+        string candidate;
+
+        if (!string.IsNullOrEmpty(decimals))
+        {
+            for (int decCount = decimals.Length - 1; decCount >= 1; decCount--)
             {
-                // ── Decimal/seconds format (S or S.ff) ──
-                // Step 1: Try without decimals
-                string noDecimals = RemoveDecimalPart(body);
-                string candidate = sign + noDecimals;
-                if (!string.IsNullOrEmpty(noDecimals) &&
-                    g.MeasureString(candidate, font).Width <= maxWidth)
+                candidate = sign + whole + "." + decimals.Substring(0, decCount);
+                if (g.MeasureString(candidate, font).Width <= maxWidth)
                     return candidate;
-
-                // Step 2: Try progressively shorter digit sequences
-                // Only return if we have at least 1 digit (no sign-only)
-                for (int len = noDecimals.Length - 1; len >= 1; len--)
-                {
-                    string shortened = noDecimals.Substring(0, len);
-                    candidate = sign + shortened;
-                    if (g.MeasureString(candidate, font).Width <= maxWidth)
-                        return candidate;
-                }
-
-                // No useful form fits → return empty
-                return string.Empty;
             }
         }
+
+        // Then try whole seconds.
+        candidate = sign + whole;
+        if (!string.IsNullOrEmpty(whole) &&
+            g.MeasureString(candidate, font).Width <= maxWidth)
+            return candidate;
+
+        // Last useful fallback: shorten whole digits, but never return sign only.
+        for (int len = whole.Length - 1; len >= 1; len--)
+        {
+            candidate = sign + whole.Substring(0, len);
+            if (g.MeasureString(candidate, font).Width <= maxWidth)
+                return candidate;
+        }
+
+        // No useful form fits → return empty.
+        return string.Empty;
+    }
+}
 
         private static string RemoveDecimalPart(string text)
         {
