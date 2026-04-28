@@ -251,6 +251,22 @@ Before publishing a new build, test:
 
 ---
 
+
+## Credits / Third-Party Notices
+
+SplitDetail is a custom component for [LiveSplit](https://github.com/LiveSplit/LiveSplit).
+
+LiveSplit is licensed under the MIT License. Copyright (c) 2013 Christopher Serr and Sergey Papushin.
+
+Some implementation patterns, including component structure, comparison handling, layout settings integration, and rendering behavior, were developed with reference to LiveSplit and existing LiveSplit components.
+
+For more details, see [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).
+
+
+---
+
 ## License
 
-MIT License.
+SplitDetail is licensed under the MIT License. See [`LICENSE.txt`](LICENSE.txt).
+
+LiveSplit and related LiveSplit assemblies are licensed separately. See [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).
