@@ -43,6 +43,7 @@ namespace LiveSplit.UI.Components
     public enum SplitDetailMode
     {
         CurrentSplit,
+        CurrentSegment,
         PriorSplit,
         PriorSubsplit
     }
@@ -114,6 +115,7 @@ namespace LiveSplit.UI.Components
         // ComponentName is shown in the Layout Editor component list.
         // We include the active mode label so multiple instances are easy to tell apart:
         //   "SplitDetail - Current Split"
+        //   "SplitDetail - Current Seg."
         //   "SplitDetail - Prev Split"
         //   "SplitDetail - Prev Seg."
         // (or whatever custom labels the user has chosen in Settings)
@@ -125,13 +127,16 @@ namespace LiveSplit.UI.Components
                 string label;
                 switch (_settings.Mode)
                 {
+                    case SplitDetailMode.CurrentSegment:
+                        label = _settings.LabelCurrentSeg;
+                        break;
                     case SplitDetailMode.PriorSplit:
                         label = _settings.LabelPrevSplit;
                         break;
                     case SplitDetailMode.PriorSubsplit:
                         label = _settings.LabelPrevSeg;
                         break;
-                    default: // CurrentSplit
+                    default:
                         label = _settings.LabelCurrentSplit;
                         break;
                 }
@@ -464,7 +469,10 @@ namespace LiveSplit.UI.Components
             switch (_settings.Mode)
             {
                 case SplitDetailMode.CurrentSplit:
-                    CalcCurrentSplit(state, run, meth, cmp1, cmp2);
+                    CalcCurrentSplit(state, run, meth, cmp1, cmp2, isCurrentSubsplit: false);
+                    break;
+                case SplitDetailMode.CurrentSegment:
+                    CalcCurrentSplit(state, run, meth, cmp1, cmp2, isCurrentSubsplit: true);
                     break;
                 case SplitDetailMode.PriorSplit:
                     CalcPriorRange(state, run, meth, cmp1, cmp2, isPriorSubsplit: false);
@@ -475,7 +483,7 @@ namespace LiveSplit.UI.Components
             }
         }
 
-        // ── Mode 1: Current Split ─────────────────────────────────────────────
+        // ── Current Split / Current Seg. ──────────────────────────────────────
         //
         //  Left           │ Middle                  │ Right
         //  ───────────────│─────────────────────────│────────────
@@ -483,9 +491,11 @@ namespace LiveSplit.UI.Components
         //                 │ Best:  1:21.35          │ 17:15.84
         //
         private void CalcCurrentSplit(LiveSplitState state, IRun run,
-                                       TimingMethod method, string cmp1, string cmp2)
+                                       TimingMethod method, string cmp1, string cmp2,
+                                       bool isCurrentSubsplit)
         {
-            _labelText    = _settings.LabelCurrentSplit;
+            _labelText    = isCurrentSubsplit ? _settings.LabelCurrentSeg
+                                               : _settings.LabelCurrentSplit;
             _cs_cmp1Label = AbbreviateComparison(cmp1);
             _cs_cmp2Label = AbbreviateComparison(cmp2);
 
@@ -493,16 +503,35 @@ namespace LiveSplit.UI.Components
                            state.CurrentPhase == TimerPhase.Paused);
             if (!active) return;
 
-            SegmentRange group = GetCurrentGroupRange(state);
-            if (!group.IsValid) return;
+            int rangeStart;
+            int rangeEnd;
+            TimeSpan? elapsed;
 
-            TimeSpan? t1 = GetComparisonRangeTime(run, group.Start, group.End, cmp1, method);
-            TimeSpan? t2 = GetComparisonRangeTime(run, group.Start, group.End, cmp2, method);
+            if (isCurrentSubsplit)
+            {
+                int idx = state.CurrentSplitIndex;
+                if (idx < 0 || idx >= run.Count) return;
+
+                rangeStart = idx;
+                rangeEnd = idx;
+                elapsed = GetActiveSegmentTime(run, state, idx, method);
+            }
+            else
+            {
+                SegmentRange group = GetCurrentGroupRange(state);
+                if (!group.IsValid) return;
+
+                rangeStart = group.Start;
+                rangeEnd = group.End;
+                elapsed = GetActiveRangeTime(run, state, group.Start, group.End, method);
+            }
+
+            TimeSpan? t1 = GetComparisonRangeTime(run, rangeStart, rangeEnd, cmp1, method);
+            TimeSpan? t2 = GetComparisonRangeTime(run, rangeStart, rangeEnd, cmp2, method);
 
             _cs_cmp1Time = FormatTime(t1, _settings.Accuracy);
             _cs_cmp2Time = FormatTime(t2, _settings.Accuracy);
 
-            TimeSpan? elapsed = GetActiveRangeTime(run, state, group.Start, group.End, method);
             _rightText = FormatTime(elapsed, _settings.Accuracy);
             // Live timer is never gold (run is still in progress)
         }
@@ -660,7 +689,8 @@ namespace LiveSplit.UI.Components
             // This prevents deltas from being pushed behind the label when switching
             // between Prev and Live display modes.
             string labelMeasureText;
-            if (_settings.Mode == SplitDetailMode.CurrentSplit)
+            if (_settings.Mode == SplitDetailMode.CurrentSplit ||
+                _settings.Mode == SplitDetailMode.CurrentSegment)
             {
                 labelMeasureText = _labelText;
             }
@@ -725,6 +755,7 @@ namespace LiveSplit.UI.Components
             switch (_settings.Mode)
             {
                 case SplitDetailMode.CurrentSplit:
+                case SplitDetailMode.CurrentSegment:
                     DrawCurrentSplitMiddle(g, mainFont, textColor, timeColor,
                                            xMid, midW, height, fmtLeft, fmtRight, ls);
                     break;

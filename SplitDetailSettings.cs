@@ -47,8 +47,9 @@ namespace LiveSplit.UI.Components
         public int    PriorityDelta             { get; private set; } = 2;
 
         // User-configurable mode labels.
-        // CurrentSplit is independently editable.
-        // For Prev/Live modes, we use suffix/name-based generation:
+        // Current Split is independently editable.
+        // Current Seg. and Prev/Live modes use suffix/name-based generation:
+        //   Current Seg. = "Current " + LabelSegment
         //   Prev Split = "Prev " + LabelSplit
         //   Live Split = "Live " + LabelSplit
         //   Prev Seg.  = "Prev " + LabelSegment
@@ -59,6 +60,7 @@ namespace LiveSplit.UI.Components
         public string LabelSegment              { get; private set; } = "Seg.";
 
         // ── Generated labels (read-only, computed from suffixes) ──────────────
+        public string LabelCurrentSeg           => "Current " + LabelSegment;
         public string LabelPrevSplit            => "Prev " + LabelSplit;
         public string LabelLiveSplit            => "Live " + LabelSplit;
         public string LabelPrevSeg              => "Prev " + LabelSegment;
@@ -169,7 +171,7 @@ namespace LiveSplit.UI.Components
 
             // Mode
             t.Controls.Add(MakeLbl("Mode:"), 0, 0);
-            _modeCombo = MakeCombo("Current Split", "Prev Split", "Prev Seg.");
+            _modeCombo = MakeCombo("Current Split", "Current Seg.", "Prev Split", "Prev Seg.");
             _modeCombo.SelectedIndex = (int)Mode;
             _modeCombo.SelectedIndexChanged += (s, e) =>
                 Mode = (SplitDetailMode)_modeCombo.SelectedIndex;
