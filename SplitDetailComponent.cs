@@ -47,6 +47,16 @@ namespace LiveSplit.UI.Components
         PriorSubsplit
     }
 
+    /// <summary>
+    /// Tracks whether the current split/segment is actively losing time.
+    /// Used to decide whether to switch from Prev to Live display.
+    /// </summary>
+    internal enum LiveDisplayMode
+    {
+        Prior,   // Show the previously completed item
+        Live     // Show the currently active item (losing time)
+    }
+
     internal struct SegmentRange
     {
         public readonly int Start;
@@ -91,6 +101,9 @@ namespace LiveSplit.UI.Components
         private string _pr_delta2      = string.Empty;
         private Color  _pr_delta2Color = Color.White;
 
+        // Live mode tracking for Prior Split / Prior Seg. modes
+        private LiveDisplayMode _currentDisplayMode = LiveDisplayMode.Prior;
+
         // ── Constructor ───────────────────────────────────────────────────────
         public SplitDetailComponent(LiveSplitState state)
         {
@@ -104,6 +117,7 @@ namespace LiveSplit.UI.Components
         //   "SplitDetail - Prev Split"
         //   "SplitDetail - Prev Seg."
         // (or whatever custom labels the user has chosen in Settings)
+        // NOTE: ComponentName reflects the configured mode, not temporary live state.
         public string ComponentName
         {
             get
@@ -268,6 +282,22 @@ namespace LiveSplit.UI.Components
             return currentTime - startTime;
         }
 
+        /// <summary>
+        /// Gets the active elapsed time for the current segment (not yet split).
+        /// </summary>
+        private TimeSpan? GetActiveSegmentTime(IRun run, LiveSplitState state,
+                                                int segmentIndex, TimingMethod method)
+        {
+            TimeSpan? currentTime = state.CurrentTime[method];
+            if (currentTime == null) return null;
+            if (segmentIndex == 0) return currentTime;
+
+            TimeSpan? prevSplitTime = run[segmentIndex - 1].SplitTime[method];
+            if (prevSplitTime == null) return null;
+
+            return currentTime - prevSplitTime;
+        }
+
         private TimeSpan? GetComparisonRangeTime(IRun run, int start, int end,
                                                   string comparison,
                                                   TimingMethod method)
@@ -322,6 +352,90 @@ namespace LiveSplit.UI.Components
             if (c == Color.Transparent)
                 c = Color.FromArgb(255, 215, 0);  // standard gold fallback
             return c;
+        }
+
+        // =====================================================================
+        // LIVE MODE DETECTION  — determine when to show current (live) vs prior
+        // =====================================================================
+
+        /// <summary>
+        /// Determines if the current active split group is losing time compared to
+        /// the selected comparison(s).
+        /// Returns true if the priority delta is positive (losing time).
+        /// 
+        /// Use ComparisonCount to decide which comparison to check:
+        /// - if ComparisonCount == 1: use Comparison 1 (ignore PriorityDelta)
+        /// - if ComparisonCount == 2: use the priority comparison
+        /// </summary>
+        private bool IsCurrentSplitLosingTime(LiveSplitState state, IRun run,
+                                               TimingMethod method, string cmp1, string cmp2)
+        {
+            SegmentRange group = GetCurrentGroupRange(state);
+            if (!group.IsValid) return false;
+
+            TimeSpan? activeTime = GetActiveRangeTime(run, state, group.Start, group.End, method);
+            if (!activeTime.HasValue) return false;
+
+            // Determine which comparison to use for live detection
+            string comparisonToCheck;
+            if (_settings.ComparisonCount == 1)
+            {
+                // Only one comparison shown: use Comparison 1
+                comparisonToCheck = cmp1;
+            }
+            else
+            {
+                // Two comparisons shown: use priority delta setting
+                comparisonToCheck = (_settings.PriorityDelta == 1) ? cmp1 : cmp2;
+            }
+
+            TimeSpan? comparisonTime = GetComparisonRangeTime(run, group.Start, group.End,
+                                                               comparisonToCheck, method);
+            if (!comparisonTime.HasValue) return false;
+
+            TimeSpan delta = activeTime.Value - comparisonTime.Value;
+            return delta.Ticks > 0;  // Positive delta = losing time
+        }
+
+        /// <summary>
+        /// Determines if the current active segment is losing time compared to
+        /// the selected comparison(s).
+        /// Returns true if the priority delta is positive (losing time).
+        /// 
+        /// Use ComparisonCount to decide which comparison to check:
+        /// - if ComparisonCount == 1: use Comparison 1 (ignore PriorityDelta)
+        /// - if ComparisonCount == 2: use the priority comparison
+        /// </summary>
+        private bool IsCurrentSegmentLosingTime(LiveSplitState state, IRun run,
+                                                 TimingMethod method, string cmp1, string cmp2)
+        {
+            int currentIdx = state.CurrentSplitIndex;
+            if (currentIdx < 0 || currentIdx >= run.Count) return false;
+
+            // Get the active elapsed time for the current segment
+            TimeSpan? activeTime = GetActiveSegmentTime(run, state, currentIdx, method);
+            if (!activeTime.HasValue) return false;
+
+            // Determine which comparison to use for live detection
+            string comparisonToCheck;
+            if (_settings.ComparisonCount == 1)
+            {
+                // Only one comparison shown: use Comparison 1
+                comparisonToCheck = cmp1;
+            }
+            else
+            {
+                // Two comparisons shown: use priority delta setting
+                comparisonToCheck = (_settings.PriorityDelta == 1) ? cmp1 : cmp2;
+            }
+
+            // Get the segment-only comparison time (not cumulative)
+            TimeSpan? comparisonTime = GetComparisonRangeTime(run, currentIdx, currentIdx,
+                                                               comparisonToCheck, method);
+            if (!comparisonTime.HasValue) return false;
+
+            TimeSpan delta = activeTime.Value - comparisonTime.Value;
+            return delta.Ticks > 0;  // Positive delta = losing time
         }
 
         // =====================================================================
@@ -397,14 +511,31 @@ namespace LiveSplit.UI.Components
         //
         //  Left         │ Middle                │ Right
         //  ─────────────│───────────────────────│────────
-        //  Prev Split   │ -1:24  -1:14          │ 22.64
-        //  Prev Seg.    │ +4:28  +4:30          │ 4:43.00
+        //  Prev Split   │ -1:24  -1:14          │ 22.64     (or Live Split label + live deltas)
+        //  Prev Seg.    │ +4:28  +4:30          │ 4:43.00   (or Live Seg. label + live deltas)
         //
         private void CalcPriorRange(LiveSplitState state, IRun run,
                                      TimingMethod method, string cmp1, string cmp2,
                                      bool isPriorSubsplit)
         {
-            _labelText = isPriorSubsplit ? _settings.LabelPrevSeg : _settings.LabelPrevSplit;
+            // Determine if we should display live data or prior data
+            bool isLosingTime = false;
+            if (isPriorSubsplit)
+                isLosingTime = IsCurrentSegmentLosingTime(state, run, method, cmp1, cmp2);
+            else
+                isLosingTime = IsCurrentSplitLosingTime(state, run, method, cmp1, cmp2);
+
+            _currentDisplayMode = isLosingTime ? LiveDisplayMode.Live : LiveDisplayMode.Prior;
+
+            // Select the label based on mode and display state
+            if (isPriorSubsplit)
+            {
+                _labelText = isLosingTime ? _settings.LabelLiveSeg : _settings.LabelPrevSeg;
+            }
+            else
+            {
+                _labelText = isLosingTime ? _settings.LabelLiveSplit : _settings.LabelPrevSplit;
+            }
 
             if (state.CurrentPhase == TimerPhase.NotRunning)
                 return;
@@ -412,27 +543,58 @@ namespace LiveSplit.UI.Components
             TimeSpan? actual = null, cmp1Time = null, cmp2Time = null;
             int rangeStart = 0, rangeEnd = 0;
 
-            if (isPriorSubsplit)
+            if (isLosingTime)
             {
-                int idx = GetPriorSubsplitIndex(state);
-                if (idx >= 0)
+                // Live mode: show the current active item
+                if (isPriorSubsplit)
                 {
-                    rangeStart = rangeEnd = idx;
-                    actual   = GetCompletedRangeTime(run, idx, idx, method);
-                    cmp1Time = GetComparisonRangeTime(run, idx, idx, cmp1, method);
-                    cmp2Time = GetComparisonRangeTime(run, idx, idx, cmp2, method);
+                    int idx = state.CurrentSplitIndex;
+                    if (idx >= 0 && idx < run.Count)
+                    {
+                        rangeStart = rangeEnd = idx;
+                        actual = GetActiveSegmentTime(run, state, idx, method);
+                        cmp1Time = GetComparisonRangeTime(run, idx, idx, cmp1, method);
+                        cmp2Time = GetComparisonRangeTime(run, idx, idx, cmp2, method);
+                    }
+                }
+                else
+                {
+                    SegmentRange group = GetCurrentGroupRange(state);
+                    if (group.IsValid)
+                    {
+                        rangeStart = group.Start;
+                        rangeEnd = group.End;
+                        actual = GetActiveRangeTime(run, state, group.Start, group.End, method);
+                        cmp1Time = GetComparisonRangeTime(run, group.Start, group.End, cmp1, method);
+                        cmp2Time = GetComparisonRangeTime(run, group.Start, group.End, cmp2, method);
+                    }
                 }
             }
             else
             {
-                SegmentRange group = GetPriorGroupRange(state);
-                if (group.IsValid)
+                // Prior mode: show the prior completed item
+                if (isPriorSubsplit)
                 {
-                    rangeStart = group.Start;
-                    rangeEnd   = group.End;
-                    actual   = GetCompletedRangeTime(run, group.Start, group.End, method);
-                    cmp1Time = GetComparisonRangeTime(run, group.Start, group.End, cmp1, method);
-                    cmp2Time = GetComparisonRangeTime(run, group.Start, group.End, cmp2, method);
+                    int idx = GetPriorSubsplitIndex(state);
+                    if (idx >= 0)
+                    {
+                        rangeStart = rangeEnd = idx;
+                        actual = GetCompletedRangeTime(run, idx, idx, method);
+                        cmp1Time = GetComparisonRangeTime(run, idx, idx, cmp1, method);
+                        cmp2Time = GetComparisonRangeTime(run, idx, idx, cmp2, method);
+                    }
+                }
+                else
+                {
+                    SegmentRange group = GetPriorGroupRange(state);
+                    if (group.IsValid)
+                    {
+                        rangeStart = group.Start;
+                        rangeEnd = group.End;
+                        actual = GetCompletedRangeTime(run, group.Start, group.End, method);
+                        cmp1Time = GetComparisonRangeTime(run, group.Start, group.End, cmp1, method);
+                        cmp2Time = GetComparisonRangeTime(run, group.Start, group.End, cmp2, method);
+                    }
                 }
             }
 
@@ -451,7 +613,8 @@ namespace LiveSplit.UI.Components
             // Gold: if actual time is a new best for this range, both delta colors
             // become gold instead of the usual ahead/behind colors — matching the
             // visual behavior of LiveSplit's Previous Segment component.
-            bool gold = IsNewBest(run, rangeStart, rangeEnd, actual, method);
+            // Note: Live mode never displays gold (still in progress).
+            bool gold = !isLosingTime && IsNewBest(run, rangeStart, rangeEnd, actual, method);
             if (gold)
             {
                 Color goldColor   = GetGoldColor(state);
@@ -492,18 +655,34 @@ namespace LiveSplit.UI.Components
 
             float colGap = Math.Max(0f, _settings.ColumnSpacing);
 
-            // ── Label column width — dynamic, matching widest possible label ──
-            // Prior modes: reserve the wider of PrevSplit/PrevSeg labels so that
-            // their delta blocks align when both are in the layout simultaneously.
+            // ── Label column width — dynamic, measuring all possible labels ──
+            // For Prior modes, measure both Prev and Live labels to reserve enough space.
+            // This prevents deltas from being pushed behind the label when switching
+            // between Prev and Live display modes.
             string labelMeasureText;
             if (_settings.Mode == SplitDetailMode.CurrentSplit)
+            {
                 labelMeasureText = _labelText;
-            else
-                labelMeasureText = _settings.LabelPrevSplit.Length >= _settings.LabelPrevSeg.Length
-                    ? _settings.LabelPrevSplit : _settings.LabelPrevSeg;
+            }
+            else if (_settings.Mode == SplitDetailMode.PriorSplit)
+            {
+                // Prev Split or Live Split — measure both to find max width
+                string prevLabel = "Prev " + _settings.LabelSplit;
+                string liveLabel = "Live " + _settings.LabelSplit;
+                labelMeasureText = prevLabel.Length >= liveLabel.Length ? prevLabel : liveLabel;
+            }
+            else  // PriorSubsplit
+            {
+                // Prev Seg. or Live Seg. — measure both to find max width
+                string prevLabel = "Prev " + _settings.LabelSegment;
+                string liveLabel = "Live " + _settings.LabelSegment;
+                labelMeasureText = prevLabel.Length >= liveLabel.Length ? prevLabel : liveLabel;
+            }
 
             SizeF labelSz  = g.MeasureString(labelMeasureText, mainFont);
-            float labelColW = Math.Max(MinLabelColumnWidth, labelSz.Width + 2f);
+            // Minimal safety gap (0.5px) after label text to prevent overlap with deltas.
+            // Column spacing setting controls the actual gap to the deltas.
+            float labelColW = Math.Max(MinLabelColumnWidth, labelSz.Width + 0.5f);
 
             // ── Column geometry ───────────────────────────────────────────────
             float xLeft  = OuterPad;
@@ -1022,15 +1201,20 @@ namespace LiveSplit.UI.Components
         /// <summary>
         /// Shortens a delta string to fit within maxWidth pixels.
         ///
-        /// Shortening strategy (in order):
-        ///   1. Return as-is if it fits.
-        ///   2. Strip decimals (e.g. "+1:24.56" → "+1:24").
-        ///   3. For ≥1 min: use compact minute notation "+1m", "+12m".
-        ///   4. For ≥1 hour: use compact hour notation "+1h".
-        ///   5. Truncate with ellipsis.
-        ///   6. Return empty string.
+        /// Handles two format types differently:
         ///
-        /// Never leaves dangling punctuation like "+1:" or "−2:".
+        /// A) Colon format (minute/hour deltas: "M:SS", "H:MM:SS"):
+        ///    - Try full text.
+        ///    - Try compact unit notation (sign + hours + "h" or sign + minutes + "m").
+        ///    - If neither fits, return empty (never truncate colons).
+        ///
+        /// B) Decimal/seconds format (no colon: "S", "S.ff"):
+        ///    - Try full text.
+        ///    - Try without decimals.
+        ///    - Try shorter digit sequences.
+        ///    - Return empty if only sign would remain.
+        ///
+        /// Never returns lone signs ("+", "−", "-") or dangling punctuation like "+3:".
         /// </summary>
         private static string ShortenDeltaToFit(Graphics g, string text, Font font, float maxWidth)
         {
@@ -1051,51 +1235,59 @@ namespace LiveSplit.UI.Components
                 body = text.Substring(1);
             }
 
-            // Step 2: strip decimals
-            string noDecimals = RemoveDecimalPart(body);
-            string candidate  = sign + noDecimals;
-            if (!string.IsNullOrEmpty(noDecimals) &&
-                g.MeasureString(candidate, font).Width <= maxWidth)
-                return candidate;
+            // Check if body contains colon (minute/hour format)
+            bool hasColon = body.Contains(":");
 
-            // Step 3: compact minute/hour notation.
-            // Parse the body to find total minutes / hours.
-            // Body formats: "S", "S.ff", "M:SS", "M:SS.ff", "H:MM:SS", ...
-            int totalMinutes = 0;
-            int totalHours   = 0;
-            ParseDeltaBody(body, out totalMinutes, out totalHours);
-
-            if (totalHours >= 1)
+            if (hasColon)
             {
-                candidate = sign + totalHours + "h";
-                if (g.MeasureString(candidate, font).Width <= maxWidth)
-                    return candidate;
+                // ── Colon format (M:SS or H:MM:SS) ──
+                // Parse to get total minutes/hours for compact notation
+                int totalMinutes = 0;
+                int totalHours = 0;
+                ParseDeltaBody(body, out totalMinutes, out totalHours);
+
+                // Try compact unit notation: "Xh" or "Xm"
+                string candidate;
+                if (totalHours >= 1)
+                {
+                    candidate = sign + totalHours + "h";
+                    if (g.MeasureString(candidate, font).Width <= maxWidth)
+                        return candidate;
+                }
+                else if (totalMinutes >= 1)
+                {
+                    candidate = sign + totalMinutes + "m";
+                    if (g.MeasureString(candidate, font).Width <= maxWidth)
+                        return candidate;
+                }
+
+                // Neither full nor compact form fits → return empty
+                // (never return partial forms like "+3:" or "+3:5")
+                return string.Empty;
             }
-            else if (totalMinutes >= 1)
+            else
             {
-                candidate = sign + totalMinutes + "m";
-                if (g.MeasureString(candidate, font).Width <= maxWidth)
+                // ── Decimal/seconds format (S or S.ff) ──
+                // Step 1: Try without decimals
+                string noDecimals = RemoveDecimalPart(body);
+                string candidate = sign + noDecimals;
+                if (!string.IsNullOrEmpty(noDecimals) &&
+                    g.MeasureString(candidate, font).Width <= maxWidth)
                     return candidate;
+
+                // Step 2: Try progressively shorter digit sequences
+                // Only return if we have at least 1 digit (no sign-only)
+                for (int len = noDecimals.Length - 1; len >= 1; len--)
+                {
+                    string shortened = noDecimals.Substring(0, len);
+                    candidate = sign + shortened;
+                    if (g.MeasureString(candidate, font).Width <= maxWidth)
+                        return candidate;
+                }
+
+                // No useful form fits → return empty
+                return string.Empty;
             }
-
-            // Step 4: progressive ellipsis truncation
-            for (int len = body.Length - 1; len >= 1; len--)
-            {
-                candidate = sign + body.Substring(0, len) + "…";
-                if (g.MeasureString(candidate, font).Width <= maxWidth)
-                    return candidate;
-
-                candidate = sign + body.Substring(0, len);
-                if (g.MeasureString(candidate, font).Width <= maxWidth)
-                    return candidate;
-            }
-
-            // Step 5: just the sign
-            if (!string.IsNullOrEmpty(sign) &&
-                g.MeasureString(sign, font).Width <= maxWidth)
-                return sign;
-
-            return string.Empty;
         }
 
         private static string RemoveDecimalPart(string text)
@@ -1156,7 +1348,7 @@ namespace LiveSplit.UI.Components
                 case "Personal Best":    return "PB";
                 case "Average Segments": return "Avg";
                 case "Balanced PB":      return "Bal";
-                case "Latest Run":       return "Latest";
+                case "Latest Run":       return "Last";
                 default:
                     return comparison.Length > 8
                         ? comparison.Substring(0, 7) + "…"

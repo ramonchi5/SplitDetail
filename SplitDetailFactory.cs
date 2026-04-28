@@ -28,8 +28,8 @@ namespace LiveSplit.UI.Components
 
         // Category determines which section of the component picker it appears in.
         // ⚠ VERIFY: ComponentCategory values available in your LiveSplit version.
-        //   Common values: RunPrediction, Comparison, Timer, List, Other, Control.
-        public ComponentCategory Category => ComponentCategory.Other;
+        //   Common values: RunPrediction, Comparison, Timer, List, Other, Information.
+        public ComponentCategory Category => ComponentCategory.Information;
 
         // Creates a new instance of the component for a given LiveSplit state.
         public IComponent Create(LiveSplitState state)

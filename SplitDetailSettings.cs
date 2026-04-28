@@ -47,9 +47,22 @@ namespace LiveSplit.UI.Components
         public int    PriorityDelta             { get; private set; } = 2;
 
         // User-configurable mode labels.
+        // CurrentSplit is independently editable.
+        // For Prev/Live modes, we use suffix/name-based generation:
+        //   Prev Split = "Prev " + LabelSplit
+        //   Live Split = "Live " + LabelSplit
+        //   Prev Seg.  = "Prev " + LabelSegment
+        //   Live Seg.  = "Live " + LabelSegment
+        // This keeps layouts clean and avoids overlap issues.
         public string LabelCurrentSplit         { get; private set; } = "Current Split";
-        public string LabelPrevSplit            { get; private set; } = "Prev Split";
-        public string LabelPrevSeg              { get; private set; } = "Prev Seg.";
+        public string LabelSplit                { get; private set; } = "Split";
+        public string LabelSegment              { get; private set; } = "Seg.";
+
+        // ── Generated labels (read-only, computed from suffixes) ──────────────
+        public string LabelPrevSplit            => "Prev " + LabelSplit;
+        public string LabelLiveSplit            => "Live " + LabelSplit;
+        public string LabelPrevSeg              => "Prev " + LabelSegment;
+        public string LabelLiveSeg              => "Live " + LabelSegment;
 
         // Empty string = no separator (default, compact layout).
         // Non-empty    = drawn between the two deltas with colGap spacing on each side.
@@ -77,8 +90,8 @@ namespace LiveSplit.UI.Components
         private ComboBox      _cmpCountCombo;
         private ComboBox      _priorityCombo;
         private TextBox       _labelCurrentBox;
-        private TextBox       _labelPrevSplitBox;
-        private TextBox       _labelPrevSegBox;
+        private TextBox       _labelSplitBox;
+        private TextBox       _labelSegmentBox;
         private TextBox       _sepBox;
         private NumericUpDown _spacingNum;
         private RadioButton   _rdoHundredths, _rdoTenths, _rdoSeconds, _rdoMilliseconds;
@@ -152,7 +165,7 @@ namespace LiveSplit.UI.Components
         // ── Mode & Labels ─────────────────────────────────────────────────────
         private Control BuildModeLabelSection()
         {
-            var t = MakeGrid(5);
+            var t = MakeGrid(4);
 
             // Mode
             t.Controls.Add(MakeLbl("Mode:"), 0, 0);
@@ -162,33 +175,23 @@ namespace LiveSplit.UI.Components
                 Mode = (SplitDetailMode)_modeCombo.SelectedIndex;
             t.Controls.Add(_modeCombo, 1, 0);
 
-            // Label: Current Split
+            // Label: Current Split (independently editable)
             t.Controls.Add(MakeLbl("Label – Current:"), 0, 1);
             _labelCurrentBox = MakeTextBox(LabelCurrentSplit, 30);
             _labelCurrentBox.TextChanged += (s, e) => LabelCurrentSplit = _labelCurrentBox.Text;
             t.Controls.Add(_labelCurrentBox, 1, 1);
 
-            // Label: Prev Split
-            t.Controls.Add(MakeLbl("Label – Prev Split:"), 0, 2);
-            _labelPrevSplitBox = MakeTextBox(LabelPrevSplit, 30);
-            _labelPrevSplitBox.TextChanged += (s, e) => LabelPrevSplit = _labelPrevSplitBox.Text;
-            t.Controls.Add(_labelPrevSplitBox, 1, 2);
+            // Label: Split suffix (generates Prev Split / Live Split)
+            t.Controls.Add(MakeLbl("Label – Split:"), 0, 2);
+            _labelSplitBox = MakeTextBox(LabelSplit, 20);
+            _labelSplitBox.TextChanged += (s, e) => LabelSplit = _labelSplitBox.Text;
+            t.Controls.Add(_labelSplitBox, 1, 2);
 
-            // Label: Prev Seg.
-            t.Controls.Add(MakeLbl("Label – Prev Seg.:"), 0, 3);
-            _labelPrevSegBox = MakeTextBox(LabelPrevSeg, 30);
-            _labelPrevSegBox.TextChanged += (s, e) => LabelPrevSeg = _labelPrevSegBox.Text;
-            t.Controls.Add(_labelPrevSegBox, 1, 3);
-
-            // Help note
-            var note = new Label
-            {
-                Text      = "Labels are shown in the left column of the component.",
-                AutoSize  = true,
-                ForeColor = SystemColors.GrayText,
-            };
-            t.SetColumnSpan(note, 2);
-            t.Controls.Add(note, 0, 4);
+            // Label: Segment suffix (generates Prev Seg. / Live Seg.)
+            t.Controls.Add(MakeLbl("Label – Segment:"), 0, 3);
+            _labelSegmentBox = MakeTextBox(LabelSegment, 20);
+            _labelSegmentBox.TextChanged += (s, e) => LabelSegment = _labelSegmentBox.Text;
+            t.Controls.Add(_labelSegmentBox, 1, 3);
 
             return t;
         }
@@ -410,15 +413,15 @@ namespace LiveSplit.UI.Components
         public XmlNode GetSettings(XmlDocument document)
         {
             XmlElement root = document.CreateElement("Settings");
-            W(document, root, "Version",           "3");
+            W(document, root, "Version",           "5");
             W(document, root, "Mode",              Mode.ToString());
             W(document, root, "Comparison1",       Comparison1);
             W(document, root, "Comparison2",       Comparison2);
             W(document, root, "ComparisonCount",   ComparisonCount.ToString());
             W(document, root, "PriorityDelta",     PriorityDelta.ToString());
             W(document, root, "LabelCurrentSplit", LabelCurrentSplit);
-            W(document, root, "LabelPrevSplit",    LabelPrevSplit);
-            W(document, root, "LabelPrevSeg",      LabelPrevSeg);
+            W(document, root, "LabelSplit",        LabelSplit);
+            W(document, root, "LabelSegment",      LabelSegment);
             W(document, root, "Separator",         Separator);
             W(document, root, "ColumnSpacing",     ColumnSpacing.ToString(System.Globalization.CultureInfo.InvariantCulture));
             W(document, root, "Accuracy",          Accuracy.ToString());
@@ -475,11 +478,42 @@ namespace LiveSplit.UI.Components
             string lcs = R(node, "LabelCurrentSplit");
             if (!string.IsNullOrEmpty(lcs)) { LabelCurrentSplit = lcs; _labelCurrentBox.Text = lcs; }
 
-            string lps = R(node, "LabelPrevSplit");
-            if (!string.IsNullOrEmpty(lps)) { LabelPrevSplit = lps; _labelPrevSplitBox.Text = lps; }
+            // Backward compatibility: if old LabelPrevSplit/LabelPrevSeg exist, try to infer the suffix
+            string labelSplit = R(node, "LabelSplit");
+            if (!string.IsNullOrEmpty(labelSplit))
+            {
+                LabelSplit = labelSplit;
+                _labelSplitBox.Text = labelSplit;
+            }
+            else
+            {
+                // Try to infer from old LabelPrevSplit field (e.g., "Prev Split" → "Split")
+                string oldPrevSplit = R(node, "LabelPrevSplit");
+                if (!string.IsNullOrEmpty(oldPrevSplit) && oldPrevSplit.StartsWith("Prev "))
+                {
+                    string inferred = oldPrevSplit.Substring(5);  // remove "Prev "
+                    LabelSplit = inferred;
+                    _labelSplitBox.Text = inferred;
+                }
+            }
 
-            string lpsg = R(node, "LabelPrevSeg");
-            if (!string.IsNullOrEmpty(lpsg)) { LabelPrevSeg = lpsg; _labelPrevSegBox.Text = lpsg; }
+            string labelSegment = R(node, "LabelSegment");
+            if (!string.IsNullOrEmpty(labelSegment))
+            {
+                LabelSegment = labelSegment;
+                _labelSegmentBox.Text = labelSegment;
+            }
+            else
+            {
+                // Try to infer from old LabelPrevSeg field (e.g., "Prev Seg." → "Seg.")
+                string oldPrevSeg = R(node, "LabelPrevSeg");
+                if (!string.IsNullOrEmpty(oldPrevSeg) && oldPrevSeg.StartsWith("Prev "))
+                {
+                    string inferred = oldPrevSeg.Substring(5);  // remove "Prev "
+                    LabelSegment = inferred;
+                    _labelSegmentBox.Text = inferred;
+                }
+            }
 
             // Separator — allow empty string (no separator is valid)
             string sep = node["Separator"]?.InnerText;   // don't use R() which skips null
