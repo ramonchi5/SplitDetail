@@ -65,11 +65,11 @@ namespace LiveSplit.UI.Components
         public string LabelLiveSeg              => "Live " + LabelSegment;
 
         // Empty string = no separator (default, compact layout).
-        // Non-empty    = drawn between the two deltas with colGap spacing on each side.
+        // Non-empty    = drawn between the two deltas with fixed compact padding.
         public string Separator                 { get; private set; } = string.Empty;
 
-        // Internal horizontal spacing between label/delta/time elements (px).
-        // Does NOT affect outer padding.
+        // Horizontal gap between the label column and delta block (px).
+        // Does NOT affect outer padding or internal delta/separator spacing.
         public float  ColumnSpacing             { get; private set; } = 3f;
 
         // Decimal accuracy for displayed times and deltas.
@@ -278,7 +278,7 @@ namespace LiveSplit.UI.Components
             var note = new Label
             {
                 Text      = "Separator: empty = no separator, just a small gap.\n" +
-                            "Column spacing: gap between columns and around separator.\n" +
+                            "Column spacing: gap between label and delta block.\n" +
                             "Outer padding is not affected.",
                 AutoSize  = true,
                 ForeColor = SystemColors.GrayText,

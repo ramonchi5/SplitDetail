@@ -693,7 +693,7 @@ namespace LiveSplit.UI.Components
                 Math.Max(22f, g.MeasureString(_rightText, mainFont).Width + 1f));
 
             float xRight = width - OuterPad - rightColW;
-            float midW   = Math.Max(0f, xRight - xMid - colGap);
+            float midW   = Math.Max(0f, xRight - xMid);
 
             float fontH = g.MeasureString("Ay", mainFont).Height;
             float textY = Math.Max(0f, (height - fontH) / 2f);
@@ -731,7 +731,7 @@ namespace LiveSplit.UI.Components
                 case SplitDetailMode.PriorSplit:
                 case SplitDetailMode.PriorSubsplit:
                     DrawPriorMiddle(g, mainFont, textColor,
-                                    xMid, midW, textY, fontH, fmtLeft, fmtRight, ls, colGap);
+                                    xMid, midW, textY, fontH, fmtLeft, fmtRight, ls);
                     break;
             }
         }
@@ -798,25 +798,25 @@ namespace LiveSplit.UI.Components
         //   Without separator:  [delta1]  [delta2]
         //   With separator:     [delta1] [sep] [delta2]
         //
-        //   The whole block is right-aligned inside the middle column.
+        //   The whole block starts after the label/column gap.
         //   Priority delta gets space first; the other is shortened if needed.
         //   Font size is NEVER changed here.
         //
         private void DrawPriorMiddle(Graphics g, Font font, Color textColor,
                               float xMid, float midW, float textY, float fontH,
                               StringFormat fmtLeft, StringFormat fmtRight,
-                              LiveSplit.Options.LayoutSettings ls,
-                              float colGap)
+                              LiveSplit.Options.LayoutSettings ls)
         {
             string sep    = _settings.Separator;          // may be empty
             bool   hasSep = !string.IsNullOrEmpty(sep);
-            float  spacing = Math.Max(0f, _settings.ColumnSpacing); // user-configurable gap
 
             // Measure separator if present
             float sepW = hasSep ? g.MeasureString(sep, font).Width + 1f : 0f;
 
-            // Gap between the two deltas (or on each side of separator)
-            float deltaGap = hasSep ? Math.Max(1f, spacing) : Math.Max(2f, spacing);
+            // Fixed internal spacing; ColumnSpacing only moves the block after the label.
+            const float DeltaGapNoSeparator = 1f;
+            const float SeparatorPad = 1f;
+            float deltaGap = hasSep ? SeparatorPad : DeltaGapNoSeparator;
 
             bool   onlyOne  = (_settings.ComparisonCount == 1 || string.IsNullOrEmpty(_pr_delta2));
             bool   prio2    = (_settings.PriorityDelta == 2);   // true = prioritize delta2
