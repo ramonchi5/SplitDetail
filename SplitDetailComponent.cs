@@ -10,13 +10,19 @@
 //   Example:
 //     index 0: "-Room 1"   ← child subsplit
 //     index 1: "-Room 2"   ← child subsplit
-//     index 2: "Castle"    ← PARENT (end of group; group spans [0,2])
+//     index 2: "Castle"    ← PARENT (group spans [0,2])
 //     index 3: "Forest"    ← standalone (group spans [3,3])
 //     index 4: "-Area A"   ← child subsplit
 //     index 5: "Mountain"  ← PARENT (group spans [4,5])
 //
 //   If subsplits are not used every segment is its own group (start==end).
 //   Change SubsplitPrefix below if your splits use a different convention.
+//
+// ── Rendering approach ────────────────────────────────────────────────────────
+//   All text goes through DrawTextWithEffects / DrawTextWithEffectsClipped.
+//   These mirror TotalTimeloss's GraphicsPath approach to respect LiveSplit
+//   shadow/outline settings without clipping descenders (p, g, y, |, etc.).
+//   Do NOT replace these calls with plain g.DrawString.
 // ============================================================================
 
 using System;
@@ -28,6 +34,7 @@ using System.Reflection;
 using System.Windows.Forms;
 using System.Xml;
 using LiveSplit.Model;
+using LiveSplit.TimeFormatters;
 using LiveSplit.UI;
 using LiveSplit.UI.Components;
 
@@ -56,44 +63,29 @@ namespace LiveSplit.UI.Components
         private const string SubsplitPrefix = "-";
 
         // ── Layout constants ──────────────────────────────────────────────────
-        // Minimum left column width (px).  Measured dynamically at draw time
-        // but never allowed to fall below this floor.
         private const float MinLabelColumnWidth = 20f;
-
-        // Gap between columns (px).
-        private const float ColGap = 3f;
-
-        // Outer left/right padding (px).
-        private const float OuterPad = 5f;
-
-        // Right column width (px) — wide enough for "0:00:00.00".
-        private const float RightColumnWidth = 78f;
-
-        // Current Split: small font scale factor.
-        // Two lines of this height must fit inside the row.
-        private const float SmallFontScale = 0.50f;
-
-        // Minimum small font size (pt).
-        private const float MinSmallFontPt = 5f;
+        private const float OuterPad            = 5f;
+        private const float RightColumnWidth    = 78f;
+        private const float SmallFontScale      = 0.50f;
+        private const float MinSmallFontPt      = 5f;
 
         // ── Settings ──────────────────────────────────────────────────────────
         private readonly SplitDetailSettings _settings;
 
-        // ── Cached display data (set in CalculateDisplayValues every tick) ────
+        // ── Cached display data ────────────────────────────────────────────────
 
         // Shared
-        private string _labelText = string.Empty;
-        private string _rightText = string.Empty;
+        private string _labelText      = string.Empty;
+        private string _rightText      = string.Empty;
+        private Color  _rightTextColor = Color.White;  // may become gold
 
-        // Current Split mode — stacked middle column
-        //   Line 1:  "PB"          _cs_pbTime
-        //   Line 2:  _cs_cmpLabel  _cs_cmpTime
-        private string _cs_pbTime   = string.Empty;
-        private string _cs_cmpLabel = string.Empty;
-        private string _cs_cmpTime  = string.Empty;
+        // Current Split mode — two small stacked comparison lines
+        private string _cs_cmp1Label = string.Empty;
+        private string _cs_cmp1Time  = string.Empty;
+        private string _cs_cmp2Label = string.Empty;
+        private string _cs_cmp2Time  = string.Empty;
 
-        // Prior Split / Prior Subsplit mode — separator-centred middle column
-        //   [_pr_delta1 right-aligned] [ sep ] [_pr_delta2 left-aligned]
+        // Prior modes — compact delta block
         private string _pr_delta1      = string.Empty;
         private Color  _pr_delta1Color = Color.White;
         private string _pr_delta2      = string.Empty;
@@ -106,11 +98,34 @@ namespace LiveSplit.UI.Components
         }
 
         // ── IComponent identity ───────────────────────────────────────────────
-        public string ComponentName => "SplitDetail";
+        // ComponentName is shown in the Layout Editor component list.
+        // We include the active mode label so multiple instances are easy to tell apart:
+        //   "SplitDetail - Current Split"
+        //   "SplitDetail - Prev Split"
+        //   "SplitDetail - Prev Seg."
+        // (or whatever custom labels the user has chosen in Settings)
+        public string ComponentName
+        {
+            get
+            {
+                string label;
+                switch (_settings.Mode)
+                {
+                    case SplitDetailMode.PriorSplit:
+                        label = _settings.LabelPrevSplit;
+                        break;
+                    case SplitDetailMode.PriorSubsplit:
+                        label = _settings.LabelPrevSeg;
+                        break;
+                    default: // CurrentSplit
+                        label = _settings.LabelCurrentSplit;
+                        break;
+                }
+                return "SplitDetail - " + label;
+            }
+        }
 
         // ── IComponent sizing ─────────────────────────────────────────────────
-        // Height is measured from the layout text font, like TotalTimeloss does,
-        // instead of using a fixed 23f value that can clip shadows/outlines.
         private float _rowHeight = 30f;
         private float RowHeight => _rowHeight;
 
@@ -135,17 +150,14 @@ namespace LiveSplit.UI.Components
         public XmlNode GetSettings(XmlDocument document) => _settings.GetSettings(document);
         public void SetSettings(XmlNode settings)        => _settings.SetSettings(settings);
 
-        // ── IComponent update ─────────────────────────────────────────────────
-        public void Update(IInvalidator invalidator,
-                           LiveSplitState state,
-                           float width, float height,
-                           LayoutMode mode)
+        // ── IComponent update/draw ────────────────────────────────────────────
+        public void Update(IInvalidator invalidator, LiveSplitState state,
+                           float width, float height, LayoutMode mode)
         {
             CalculateDisplayValues(state);
             invalidator?.Invalidate(0, 0, width, height);
         }
 
-        // ── IComponent drawing ────────────────────────────────────────────────
         public void DrawHorizontal(Graphics g, LiveSplitState state,
                                    float height, Region clipRegion)
             => DrawRow(g, state, HorizontalWidth, height);
@@ -176,12 +188,10 @@ namespace LiveSplit.UI.Components
             if (segmentIndex < 0 || segmentIndex >= run.Count)
                 return SegmentRange.Invalid;
 
-            // Step 1: forward to parent (first non-"-" segment at or after index)
             int end = segmentIndex;
             while (end < run.Count - 1 && run[end].Name.StartsWith(SubsplitPrefix))
                 end++;
 
-            // Step 2: backward to first child
             int start = end;
             while (start > 0 && run[start - 1].Name.StartsWith(SubsplitPrefix))
                 start--;
@@ -189,10 +199,6 @@ namespace LiveSplit.UI.Components
             return new SegmentRange(start, end);
         }
 
-        /// <summary>
-        /// Returns the group range that is currently being run.
-        /// Returns Invalid when the run is not in progress.
-        /// </summary>
         private SegmentRange GetCurrentGroupRange(LiveSplitState state)
         {
             if (state.CurrentPhase == TimerPhase.NotRunning ||
@@ -206,12 +212,6 @@ namespace LiveSplit.UI.Components
             return GetGroupRange(state.Run, idx);
         }
 
-        /// <summary>
-        /// Returns the last fully completed parent split group.
-        ///   While running → the group just before the current group.
-        ///   After ending  → the group containing the final segment.
-        ///   Not started   → Invalid.
-        /// </summary>
         private SegmentRange GetPriorGroupRange(LiveSplitState state)
         {
             if (state.CurrentPhase == TimerPhase.NotRunning)
@@ -224,15 +224,11 @@ namespace LiveSplit.UI.Components
 
             SegmentRange currentGroup = GetCurrentGroupRange(state);
             if (!currentGroup.IsValid || currentGroup.Start <= 0)
-                return SegmentRange.Invalid; // still in the first group
+                return SegmentRange.Invalid;
 
             return GetGroupRange(run, currentGroup.Start - 1);
         }
 
-        /// <summary>
-        /// Returns the index of the last completed individual segment.
-        /// Returns -1 when there is no prior segment.
-        /// </summary>
         private int GetPriorSubsplitIndex(LiveSplitState state)
         {
             if (state.CurrentPhase == TimerPhase.NotRunning) return -1;
@@ -245,11 +241,6 @@ namespace LiveSplit.UI.Components
         // TIMING CALCULATIONS  — do not modify unless changing timing logic
         // =====================================================================
 
-        /// <summary>
-        /// Current run time for a completed segment range [start, end].
-        /// Formula: run[end].SplitTime − run[start-1].SplitTime  (start==0: omit offset)
-        /// Returns null if any boundary time is missing.
-        /// </summary>
         private TimeSpan? GetCompletedRangeTime(IRun run, int start, int end,
                                                  TimingMethod method)
         {
@@ -263,11 +254,6 @@ namespace LiveSplit.UI.Components
             return endTime - startTime;
         }
 
-        /// <summary>
-        /// Live elapsed time for the currently active range from start.
-        /// Uses state.CurrentTime as the live "end" point.
-        /// Returns null if timing data is unavailable.
-        /// </summary>
         private TimeSpan? GetActiveRangeTime(IRun run, LiveSplitState state,
                                               int start, int end,
                                               TimingMethod method)
@@ -282,12 +268,6 @@ namespace LiveSplit.UI.Components
             return currentTime - startTime;
         }
 
-        /// <summary>
-        /// Comparison predicted time for a segment range [start, end].
-        /// Formula: comparison[end] − comparison[start-1]  (start==0: omit offset)
-        /// Works for any comparison name including Best Segments.
-        /// Returns null if comparison data is unavailable.
-        /// </summary>
         private TimeSpan? GetComparisonRangeTime(IRun run, int start, int end,
                                                   string comparison,
                                                   TimingMethod method)
@@ -303,122 +283,144 @@ namespace LiveSplit.UI.Components
         }
 
         // =====================================================================
+        // GOLD DETECTION
+        // =====================================================================
+
+        /// <summary>
+        /// Returns true if 'actual' is faster than the sum of best segment times
+        /// for the given range — i.e. the runner just set a new best for this group.
+        /// Uses BestSegmentTime per-segment and sums them, matching how LiveSplit
+        /// tracks golds at the segment level.
+        /// </summary>
+        private static bool IsNewBest(IRun run, int start, int end,
+                                       TimeSpan? actual, TimingMethod method)
+        {
+            if (!actual.HasValue) return false;
+
+            TimeSpan bestSum = TimeSpan.Zero;
+            for (int i = start; i <= end; i++)
+            {
+                TimeSpan? best = run[i].BestSegmentTime[method];
+                if (!best.HasValue) return false;   // no reference → can't confirm gold
+                bestSum += best.Value;
+            }
+
+            return actual.Value < bestSum;
+        }
+
+        /// <summary>
+        /// Returns the gold/best-segment color from layout settings.
+        /// Tries several property names via reflection for version compatibility.
+        /// ⚠ VERIFY: "GoldColor" may be named differently in some LiveSplit forks.
+        /// </summary>
+        private static Color GetGoldColor(LiveSplitState state)
+        {
+            var ls = state.LayoutSettings;
+            Color c = GetLayoutSetting(ls, "GoldColor", Color.Transparent);
+            if (c == Color.Transparent)
+                c = GetLayoutSetting(ls, "BestSegmentColor", Color.Transparent);
+            if (c == Color.Transparent)
+                c = Color.FromArgb(255, 215, 0);  // standard gold fallback
+            return c;
+        }
+
+        // =====================================================================
         // DISPLAY VALUE CALCULATION
         // =====================================================================
 
         private void CalculateDisplayValues(LiveSplitState state)
         {
-            // Reset all cached values
-            _labelText     = string.Empty;
-            _rightText     = Dash;
-            _cs_pbTime     = Dash;
-            _cs_cmpLabel   = string.Empty;
-            _cs_cmpTime    = Dash;
-            _pr_delta1     = Dash;
-            _pr_delta2     = Dash;
+            _labelText      = string.Empty;
+            _rightText      = Dash;
+            _rightTextColor = _settings.TimeColor;
+            _cs_cmp1Label   = string.Empty;
+            _cs_cmp1Time    = Dash;
+            _cs_cmp2Label   = string.Empty;
+            _cs_cmp2Time    = Dash;
+            _pr_delta1      = Dash;
+            _pr_delta2      = Dash;
             _pr_delta1Color = _settings.TextColor;
             _pr_delta2Color = _settings.TextColor;
 
-            IRun         run        = state.Run;
-            TimingMethod method     = state.CurrentTimingMethod;
-            string       comparison = _settings.Comparison;
-            string       pbComp    = "Personal Best";
+            IRun         run  = state.Run;
+            TimingMethod meth = state.CurrentTimingMethod;
+            string       cmp1 = _settings.Comparison1;
+            string       cmp2 = _settings.Comparison2;
 
             switch (_settings.Mode)
             {
                 case SplitDetailMode.CurrentSplit:
-                    CalcCurrentSplit(state, run, method, comparison, pbComp);
+                    CalcCurrentSplit(state, run, meth, cmp1, cmp2);
                     break;
                 case SplitDetailMode.PriorSplit:
-                    CalcPriorRange(state, run, method, comparison, pbComp, isPriorSubsplit: false);
+                    CalcPriorRange(state, run, meth, cmp1, cmp2, isPriorSubsplit: false);
                     break;
                 case SplitDetailMode.PriorSubsplit:
-                    CalcPriorRange(state, run, method, comparison, pbComp, isPriorSubsplit: true);
+                    CalcPriorRange(state, run, meth, cmp1, cmp2, isPriorSubsplit: true);
                     break;
             }
         }
 
         // ── Mode 1: Current Split ─────────────────────────────────────────────
         //
-        //  Left      │ Middle            │ Right
-        //  ──────────│───────────────────│────────────
-        //  Current   │ PB    1:36.55     │
-        //  Split     │ Best  1:21.35     │ 17:15.84
-        //
-        //  Middle column: two small stacked lines
-        //    Line 1 — "PB"          _cs_pbTime    (right-aligned in middle)
-        //    Line 2 — _cs_cmpLabel  _cs_cmpTime   (right-aligned in middle)
+        //  Left           │ Middle                  │ Right
+        //  ───────────────│─────────────────────────│────────────
+        //  Current Split  │ PB:    1:36.55          │
+        //                 │ Best:  1:21.35          │ 17:15.84
         //
         private void CalcCurrentSplit(LiveSplitState state, IRun run,
-                                       TimingMethod method,
-                                       string comparison, string pbComp)
+                                       TimingMethod method, string cmp1, string cmp2)
         {
-            _labelText = "Current Split";
-            _cs_cmpLabel = AbbreviateComparison(comparison);
+            _labelText    = _settings.LabelCurrentSplit;
+            _cs_cmp1Label = AbbreviateComparison(cmp1);
+            _cs_cmp2Label = AbbreviateComparison(cmp2);
 
             bool active = (state.CurrentPhase == TimerPhase.Running ||
                            state.CurrentPhase == TimerPhase.Paused);
-
-            if (!active)
-            {
-                // Run not started / ended — show dashes
-                _cs_pbTime  = Dash;
-                _cs_cmpTime = Dash;
-                _rightText  = Dash;
-                return;
-            }
+            if (!active) return;
 
             SegmentRange group = GetCurrentGroupRange(state);
-            if (!group.IsValid)
-            {
-                _cs_pbTime  = Dash;
-                _cs_cmpTime = Dash;
-                _rightText  = Dash;
-                return;
-            }
+            if (!group.IsValid) return;
 
-            TimeSpan? pbTime  = GetComparisonRangeTime(run, group.Start, group.End, pbComp,    method);
-            TimeSpan? cmpTime = GetComparisonRangeTime(run, group.Start, group.End, comparison, method);
+            TimeSpan? t1 = GetComparisonRangeTime(run, group.Start, group.End, cmp1, method);
+            TimeSpan? t2 = GetComparisonRangeTime(run, group.Start, group.End, cmp2, method);
 
-            _cs_pbTime  = FormatTime(pbTime);
-            _cs_cmpTime = FormatTime(cmpTime);
+            _cs_cmp1Time = FormatTime(t1, _settings.Accuracy);
+            _cs_cmp2Time = FormatTime(t2, _settings.Accuracy);
 
             TimeSpan? elapsed = GetActiveRangeTime(run, state, group.Start, group.End, method);
-            _rightText = FormatTime(elapsed);
+            _rightText = FormatTime(elapsed, _settings.Accuracy);
+            // Live timer is never gold (run is still in progress)
         }
 
-        // ── Mode 2 & 3: Prior Split / Prior Subsplit ──────────────────────────
+        // ── Mode 2 & 3: Prev Split / Prev Seg. ───────────────────────────────
         //
-        //  Left           │ Middle                       │ Right
-        //  ───────────────│──────────────────────────────│────────
-        //  Prior Split    │ -1:24.03  |  -1:14.33        │ 22.64
-        //  Prior Subsplit │ +4:28.89  |  +4:30.61        │ 4:43.00
-        //
-        //  Middle column:
-        //    _pr_delta1  right-aligned to left of separator
-        //    separator   centered in middle column
-        //    _pr_delta2  left-aligned from right of separator
+        //  Left         │ Middle                │ Right
+        //  ─────────────│───────────────────────│────────
+        //  Prev Split   │ -1:24  -1:14          │ 22.64
+        //  Prev Seg.    │ +4:28  +4:30          │ 4:43.00
         //
         private void CalcPriorRange(LiveSplitState state, IRun run,
-                                     TimingMethod method,
-                                     string comparison, string pbComp,
+                                     TimingMethod method, string cmp1, string cmp2,
                                      bool isPriorSubsplit)
         {
-            _labelText = isPriorSubsplit ? "Prev Seg." : "Prev Split";
+            _labelText = isPriorSubsplit ? _settings.LabelPrevSeg : _settings.LabelPrevSplit;
 
             if (state.CurrentPhase == TimerPhase.NotRunning)
-                return; // all fields already set to Dash
+                return;
 
-            TimeSpan? actual = null, pbTime = null, cmpTime = null;
+            TimeSpan? actual = null, cmp1Time = null, cmp2Time = null;
+            int rangeStart = 0, rangeEnd = 0;
 
             if (isPriorSubsplit)
             {
                 int idx = GetPriorSubsplitIndex(state);
                 if (idx >= 0)
                 {
-                    actual  = GetCompletedRangeTime(run, idx, idx, method);
-                    pbTime  = GetComparisonRangeTime(run, idx, idx, pbComp,    method);
-                    cmpTime = GetComparisonRangeTime(run, idx, idx, comparison, method);
+                    rangeStart = rangeEnd = idx;
+                    actual   = GetCompletedRangeTime(run, idx, idx, method);
+                    cmp1Time = GetComparisonRangeTime(run, idx, idx, cmp1, method);
+                    cmp2Time = GetComparisonRangeTime(run, idx, idx, cmp2, method);
                 }
             }
             else
@@ -426,97 +428,97 @@ namespace LiveSplit.UI.Components
                 SegmentRange group = GetPriorGroupRange(state);
                 if (group.IsValid)
                 {
-                    actual  = GetCompletedRangeTime(run, group.Start, group.End, method);
-                    pbTime  = GetComparisonRangeTime(run, group.Start, group.End, pbComp,    method);
-                    cmpTime = GetComparisonRangeTime(run, group.Start, group.End, comparison, method);
+                    rangeStart = group.Start;
+                    rangeEnd   = group.End;
+                    actual   = GetCompletedRangeTime(run, group.Start, group.End, method);
+                    cmp1Time = GetComparisonRangeTime(run, group.Start, group.End, cmp1, method);
+                    cmp2Time = GetComparisonRangeTime(run, group.Start, group.End, cmp2, method);
                 }
             }
 
-            _rightText = FormatTime(actual);
+            // Right side: actual time — always TimeColor, never gold.
+            _rightText      = FormatTime(actual, _settings.Accuracy);
+            _rightTextColor = _settings.TimeColor;
 
-            TimeSpan? deltaPb  = (actual.HasValue && pbTime.HasValue)
-                ? actual.Value  - pbTime.Value  : (TimeSpan?)null;
-            TimeSpan? deltaCmp = (actual.HasValue && cmpTime.HasValue)
-                ? actual.Value - cmpTime.Value : (TimeSpan?)null;
+            TimeSpan? delta1 = (actual.HasValue && cmp1Time.HasValue)
+                ? actual.Value - cmp1Time.Value : (TimeSpan?)null;
+            TimeSpan? delta2 = (actual.HasValue && cmp2Time.HasValue)
+                ? actual.Value - cmp2Time.Value : (TimeSpan?)null;
 
-            _pr_delta1      = FormatDelta(deltaPb);
-            _pr_delta2      = FormatDelta(deltaCmp);
-            _pr_delta1Color = DeltaColor(state, deltaPb);
-            _pr_delta2Color = DeltaColor(state, deltaCmp);
+            _pr_delta1 = FormatDelta(delta1, _settings.Accuracy);
+            _pr_delta2 = FormatDelta(delta2, _settings.Accuracy);
+
+            // Gold: if actual time is a new best for this range, both delta colors
+            // become gold instead of the usual ahead/behind colors — matching the
+            // visual behavior of LiveSplit's Previous Segment component.
+            bool gold = IsNewBest(run, rangeStart, rangeEnd, actual, method);
+            if (gold)
+            {
+                Color goldColor   = GetGoldColor(state);
+                _pr_delta1Color   = goldColor;
+                _pr_delta2Color   = goldColor;
+            }
+            else
+            {
+                _pr_delta1Color = DeltaColor(state, delta1);
+                _pr_delta2Color = DeltaColor(state, delta2);
+            }
+
+            // If only one comparison, suppress delta2
+            if (_settings.ComparisonCount == 1)
+            {
+                _pr_delta2      = string.Empty;
+                _pr_delta2Color = _settings.TextColor;
+            }
         }
 
         // =====================================================================
         // DRAWING
         // =====================================================================
 
-        /// <summary>
-        /// Renders the one-row component.
-        ///
-        /// Column layout:
-        ///
-        ///   [OuterPad] [Left: auto-sized to label] [ColGap]
-        ///   [Middle: remainder] [ColGap]
-        ///   [Right: RightColumnWidth] [OuterPad]
-        ///
-        /// The left column width is measured from the actual label text each
-        /// frame so "Prior Subsplit" never gets truncated.  The middle column
-        /// gets all remaining space.
-        ///
-        /// Current Split mode draws two small stacked lines in the middle.
-        /// Prior modes draw: [delta1 right] [separator] [delta2 left].
-        /// </summary>
         private void DrawRow(Graphics g, LiveSplitState state, float width, float height)
         {
             var ls = state.LayoutSettings;
 
-            // ── Background ───────────────────────────────────────────────────
             DrawBackground(g, ls, width, height);
 
-            // ── Fonts ────────────────────────────────────────────────────────
             Font mainFont = ls.TextFont ?? SystemFonts.DefaultFont;
 
-            // Match TotalTimeloss-style sizing: MeasureString gives the actual
-            // visual height needed by this font, including the extra room that
-            // prevents descenders/shadows/outlines from being clipped.
             _rowHeight = Math.Max(30f, g.MeasureString("Ay", mainFont).Height);
             height = Math.Max(height, _rowHeight);
 
-            // ── Colors ───────────────────────────────────────────────────────
-            // Use the user-configurable colors from settings.
             Color textColor = _settings.TextColor;
             Color timeColor = _settings.TimeColor;
 
-            // ── Measure label width dynamically ──────────────────────────────
-            // Current Split can use its own width.
-            // Prior Split and Prior Seg. must reserve the same label width so
-            // their separator/delta blocks align across multiple SplitDetail rows.
-            string labelMeasureText = _settings.Mode == SplitDetailMode.CurrentSplit
-                ? _labelText
-                : "Prev Split";
+            float colGap = Math.Max(0f, _settings.ColumnSpacing);
 
-            SizeF labelSz = g.MeasureString(labelMeasureText, mainFont);
+            // ── Label column width — dynamic, matching widest possible label ──
+            // Prior modes: reserve the wider of PrevSplit/PrevSeg labels so that
+            // their delta blocks align when both are in the layout simultaneously.
+            string labelMeasureText;
+            if (_settings.Mode == SplitDetailMode.CurrentSplit)
+                labelMeasureText = _labelText;
+            else
+                labelMeasureText = _settings.LabelPrevSplit.Length >= _settings.LabelPrevSeg.Length
+                    ? _settings.LabelPrevSplit : _settings.LabelPrevSeg;
+
+            SizeF labelSz  = g.MeasureString(labelMeasureText, mainFont);
             float labelColW = Math.Max(MinLabelColumnWidth, labelSz.Width + 2f);
 
             // ── Column geometry ───────────────────────────────────────────────
-            float xLeft = OuterPad;
-            float xMid = xLeft + labelColW + ColGap;
+            float xLeft  = OuterPad;
+            float xMid   = xLeft + labelColW + colGap;
 
-            // Use only the width the right-side time actually needs, up to the max.
-            // This gives more room to the delta block when the time is short.
             float rightColW = Math.Min(
                 RightColumnWidth,
                 Math.Max(22f, g.MeasureString(_rightText, mainFont).Width + 1f));
 
             float xRight = width - OuterPad - rightColW;
-            float midW = Math.Max(0f, xRight - xMid - ColGap);
+            float midW   = Math.Max(0f, xRight - xMid - colGap);
 
-            // ── Vertical center helpers ───────────────────────────────────────
-            // Use MeasureString instead of GetHeight, like TotalTimeloss.
-            // This gives enough vertical room for descenders, shadows and outlines.
             float fontH = g.MeasureString("Ay", mainFont).Height;
             float textY = Math.Max(0f, (height - fontH) / 2f);
 
-            // ── StringFormats ─────────────────────────────────────────────────
             var fmtLeft = new StringFormat
             {
                 Alignment   = StringAlignment.Near,
@@ -530,41 +532,35 @@ namespace LiveSplit.UI.Components
                 FormatFlags = StringFormatFlags.NoWrap,
             };
 
-            // ── Left column: mode label ───────────────────────────────────────
-            // Uses the user-selected TextColor directly — no dimming.
+            // ── Left: mode label ──────────────────────────────────────────────
             DrawTextWithEffects(g, _labelText, mainFont, textColor,
                                 new RectangleF(xLeft, textY, labelColW, fontH),
                                 fmtLeft, ls);
 
-            // ── Right column: time / timer ────────────────────────────────────
-            DrawTextWithEffects(g, _rightText, mainFont, timeColor,
+            // ── Right: time / timer ───────────────────────────────────────────
+            DrawTextWithEffects(g, _rightText, mainFont, _rightTextColor,
                                 new RectangleF(xRight, textY, rightColW, fontH),
                                 fmtRight, ls);
 
-            // ── Middle column: mode-dependent ────────────────────────────────
+            // ── Middle: mode-dependent ────────────────────────────────────────
             switch (_settings.Mode)
             {
                 case SplitDetailMode.CurrentSplit:
                     DrawCurrentSplitMiddle(g, mainFont, textColor, timeColor,
                                            xMid, midW, height, fmtLeft, fmtRight, ls);
                     break;
-
                 case SplitDetailMode.PriorSplit:
                 case SplitDetailMode.PriorSubsplit:
                     DrawPriorMiddle(g, mainFont, textColor,
-                                    xMid, midW, textY, fontH, fmtLeft, fmtRight, ls);
+                                    xMid, midW, textY, fontH, fmtLeft, fmtRight, ls, colGap);
                     break;
             }
         }
 
-        // ── Current Split middle column ───────────────────────────────────────
+        // ── Current Split: stacked small comparison lines ─────────────────────
         //
-        //   Two stacked small-font lines, each spanning the full middle width:
-        //
-        //     PB    [right-aligned time]
-        //     Best  [right-aligned time]
-        //
-        //   Both lines are centered together vertically inside the row.
+        //   PB:    1:36.55       ← line 1 (cmp1)
+        //   Best:  1:21.35       ← line 2 (cmp2, only if ComparisonCount == 2)
         //
         private void DrawCurrentSplitMiddle(Graphics g, Font mainFont,
                                      Color textColor, Color timeColor,
@@ -572,151 +568,180 @@ namespace LiveSplit.UI.Components
                                      StringFormat fmtLeft, StringFormat fmtRight,
                                      LiveSplit.Options.LayoutSettings ls)
         {
-            // Scale the font down so two lines fit comfortably in one row.
             float smallPt = Math.Max(MinSmallFontPt, mainFont.Size * SmallFontScale);
             using (var smallFont = new Font(mainFont.FontFamily, smallPt, FontStyle.Regular))
             {
-                float lineH = smallFont.GetHeight(g);
+                bool twoLines = (_settings.ComparisonCount == 2);
+
+                float lineH    = smallFont.GetHeight(g);
                 float lineStep = lineH * 0.68f;
-                float totalH = lineH + lineStep;
-                float y1 = (height - totalH) / 2f;
-                float y2 = y1 + lineStep;
+                float totalH   = twoLines ? (lineH + lineStep) : lineH;
+                float y1       = (height - totalH) / 2f;
+                float y2       = y1 + lineStep;
 
-                string pbLabel = "PB:";
-                string cmpLabel = _cs_cmpLabel + ":";
+                string lbl1 = _cs_cmp1Label + ":";
+                string lbl2 = twoLines ? _cs_cmp2Label + ":" : string.Empty;
 
-                // Compact label column. Keep PB/Best labels aligned, but keep the
-                // gap between label and time small.
-                float labelSubW = Math.Max(
-                    g.MeasureString(pbLabel, smallFont).Width,
-                    g.MeasureString(cmpLabel, smallFont).Width) + 2f;
+                float labelSubW = g.MeasureString(lbl1, smallFont).Width;
+                if (twoLines)
+                    labelSubW = Math.Max(labelSubW, g.MeasureString(lbl2, smallFont).Width);
+                labelSubW += 2f;
 
-                // Compact time column. Both times stay aligned with each other,
-                // but they no longer use the entire middle column width.
-                float timeSubW = Math.Max(
-                    g.MeasureString(_cs_pbTime, smallFont).Width,
-                    g.MeasureString(_cs_cmpTime, smallFont).Width) + 4f;
+                float timeSubW = g.MeasureString(_cs_cmp1Time, smallFont).Width;
+                if (twoLines)
+                    timeSubW = Math.Max(timeSubW, g.MeasureString(_cs_cmp2Time, smallFont).Width);
+                timeSubW += 4f;
 
                 if (labelSubW + timeSubW > midW)
                     timeSubW = Math.Max(0f, midW - labelSubW);
 
-                // Line 1: "PB:" label (time color) + PB time (time color)
-                DrawTextWithEffects(g, "PB:", smallFont, timeColor,
-                                    new RectangleF(xMid, y1, labelSubW, lineH),
-                                    fmtLeft, ls);
+                // Line 1: cmp1 label + cmp1 time
+                DrawTextWithEffects(g, lbl1, smallFont, timeColor,
+                                    new RectangleF(xMid, y1, labelSubW, lineH), fmtLeft, ls);
+                DrawTextWithEffectsFit(g, _cs_cmp1Time, smallFont, timeColor,
+                                       new RectangleF(xMid + labelSubW, y1, timeSubW, lineH),
+                                       fmtRight, ls, MinSmallFontPt);
 
-                DrawTextWithEffectsFit(g, _cs_pbTime, smallFont, timeColor,
-                       new RectangleF(xMid + labelSubW, y1, timeSubW, lineH),
-                       fmtRight, ls, MinSmallFontPt);
-
-                // Line 2: comparison label (time color) + comparison time (time color)
-                DrawTextWithEffects(g, cmpLabel, smallFont, timeColor,
-                                    new RectangleF(xMid, y2, labelSubW, lineH),
-                                    fmtLeft, ls);
-
-                DrawTextWithEffectsFit(g, _cs_cmpTime, smallFont, timeColor,
-                       new RectangleF(xMid + labelSubW, y2, timeSubW, lineH),
-                       fmtRight, ls, MinSmallFontPt);
+                // Line 2: cmp2 label + cmp2 time (only if two comparisons)
+                if (twoLines)
+                {
+                    DrawTextWithEffects(g, lbl2, smallFont, timeColor,
+                                        new RectangleF(xMid, y2, labelSubW, lineH), fmtLeft, ls);
+                    DrawTextWithEffectsFit(g, _cs_cmp2Time, smallFont, timeColor,
+                                           new RectangleF(xMid + labelSubW, y2, timeSubW, lineH),
+                                           fmtRight, ls, MinSmallFontPt);
+                }
             }
         }
 
-        // ── Prior Split / Prior Subsplit middle column ────────────────────────
+        // ── Prior modes: compact delta block ──────────────────────────────────
         //
-        //   Three sub-elements drawn at fixed positions:
+        //   Without separator:  [delta1]  [delta2]
+        //   With separator:     [delta1] [sep] [delta2]
         //
-        //     [delta1 right-aligned] [sep centered] [delta2 left-aligned]
-        //
-        //   The separator is drawn at the horizontal center of the middle column.
-        //   delta1 is right-aligned immediately to the left of the separator.
-        //   delta2 is left-aligned immediately to the right of the separator.
+        //   The whole block is right-aligned inside the middle column.
+        //   Priority delta gets space first; the other is shortened if needed.
+        //   Font size is NEVER changed here.
         //
         private void DrawPriorMiddle(Graphics g, Font font, Color textColor,
                               float xMid, float midW, float textY, float fontH,
                               StringFormat fmtLeft, StringFormat fmtRight,
-                              LiveSplit.Options.LayoutSettings ls)
+                              LiveSplit.Options.LayoutSettings ls,
+                              float colGap)
         {
-            // No separator: just a small gap between both deltas.
-            const float DeltaGap = 2f;
+            string sep    = _settings.Separator;          // may be empty
+            bool   hasSep = !string.IsNullOrEmpty(sep);
+            float  spacing = Math.Max(0f, _settings.ColumnSpacing); // user-configurable gap
+
+            // Measure separator if present
+            float sepW = hasSep ? g.MeasureString(sep, font).Width + 1f : 0f;
+
+            // Gap between the two deltas (or on each side of separator)
+            float deltaGap = hasSep ? Math.Max(1f, spacing) : Math.Max(2f, spacing);
+
+            bool   onlyOne  = (_settings.ComparisonCount == 1 || string.IsNullOrEmpty(_pr_delta2));
+            bool   prio2    = (_settings.PriorityDelta == 2);   // true = prioritize delta2
 
             string d1Text = _pr_delta1;
-            string d2Text = _pr_delta2;
+            string d2Text = onlyOne ? string.Empty : _pr_delta2;
 
-            float available = Math.Max(0f, midW - DeltaGap);
+            // Total space: middle width minus separator (and gaps around it)
+            float gapTotal = hasSep && !onlyOne ? (sepW + deltaGap * 2f) : (onlyOne ? 0f : deltaGap);
+            float available = Math.Max(0f, midW - gapTotal);
 
-            float d1NaturalW = g.MeasureString(d1Text, font).Width + 1f;
-            float d2NaturalW = g.MeasureString(d2Text, font).Width + 1f;
+            float d1NaturalW = string.IsNullOrEmpty(d1Text)
+                ? 0f : g.MeasureString(d1Text, font).Width + 1f;
+            float d2NaturalW = string.IsNullOrEmpty(d2Text)
+                ? 0f : g.MeasureString(d2Text, font).Width + 1f;
 
-            float d1W;
-            float d2W;
+            float d1W, d2W;
 
-            if (d1NaturalW + d2NaturalW <= available)
+            if (onlyOne)
             {
-                // Best case: both deltas fit fully.
+                // Only delta1 (or whichever is non-empty)
+                d1W = Math.Min(d1NaturalW, midW);
+                d2W = 0f;
+            }
+            else if (d1NaturalW + d2NaturalW <= available)
+            {
+                // Best case: both fit
                 d1W = d1NaturalW;
                 d2W = d2NaturalW;
             }
             else
             {
-                // Tight case:
-                // Prioritize the second delta, because it is the comparison / Best delta.
-                d2W = Math.Min(d2NaturalW, available);
-                d1W = Math.Max(0f, available - d2W);
-
-                // If the comparison delta itself is too large, it gets all the space
-                // and the PB delta disappears.
-                if (d2NaturalW > available)
+                // Tight: prioritize the preferred delta
+                if (prio2)
                 {
-                    d2W = available;
-                    d1W = 0f;
+                    d2W = Math.Min(d2NaturalW, available);
+                    d1W = Math.Max(0f, available - d2W);
+                    if (d2NaturalW > available) { d2W = available; d1W = 0f; }
+                }
+                else
+                {
+                    d1W = Math.Min(d1NaturalW, available);
+                    d2W = Math.Max(0f, available - d1W);
+                    if (d1NaturalW > available) { d1W = available; d2W = 0f; }
                 }
             }
 
+            // Shorten delta text to fit their allocated widths
             d1Text = ShortenDeltaToFit(g, d1Text, font, d1W);
             d2Text = ShortenDeltaToFit(g, d2Text, font, d2W);
 
-            // Re-measure after shortening, so the block stays compact.
-            if (string.IsNullOrEmpty(d1Text))
-                d1W = 0f;
-            else
-                d1W = Math.Min(d1W, g.MeasureString(d1Text, font).Width + 1f);
+            // Re-measure after shortening for a tight block
+            if (string.IsNullOrEmpty(d1Text)) d1W = 0f;
+            else d1W = Math.Min(d1W, g.MeasureString(d1Text, font).Width + 1f);
 
-            if (string.IsNullOrEmpty(d2Text))
-                d2W = 0f;
-            else
-                d2W = Math.Min(d2W, g.MeasureString(d2Text, font).Width + 1f);
+            if (string.IsNullOrEmpty(d2Text)) d2W = 0f;
+            else d2W = Math.Min(d2W, g.MeasureString(d2Text, font).Width + 1f);
 
-            float actualGap = d1W > 0f && d2W > 0f ? DeltaGap : 0f;
-            float blockW = d1W + actualGap + d2W;
+            // Build the block: [d1] [gap/sep/gap] [d2]
+            bool  drawSep     = hasSep && !onlyOne && (d1W > 0f || d2W > 0f);
+            float innerGap    = drawSep ? (sepW + deltaGap * 2f) : (d1W > 0f && d2W > 0f ? deltaGap : 0f);
+            float blockW      = d1W + innerGap + d2W;
 
-            // Right-align the whole block inside the middle column.
-            float blockX = xMid + midW - blockW;
+            // Left-anchor the block immediately after the label column.
+            // Free space appears between the delta block and the right-side time,
+            // not between the label and the deltas.  This keeps the deltas visually
+            // stable even as the right-side time width changes during the run.
+            float blockX = xMid;
 
-            float d1X = blockX;
-            float d2X = blockX + d1W + actualGap;
+            float d1X   = blockX;
+            float sepX  = blockX + d1W + (drawSep ? deltaGap : 0f);
+            float d2X   = drawSep ? (sepX + sepW + deltaGap) : (blockX + d1W + deltaGap);
 
-            // Never resize the font here. If something still does not fit perfectly,
-            // it gets clipped inside its own zone instead of invading other columns.
             if (d1W > 0f)
-            {
                 DrawTextWithEffectsClipped(g, d1Text, font, _pr_delta1Color,
                                            new RectangleF(d1X, textY, d1W, fontH),
                                            fmtRight, ls);
-            }
+
+            if (drawSep)
+                DrawTextWithEffects(g, sep, font, _pr_delta1Color,
+                                    new RectangleF(sepX, textY, sepW, fontH),
+                                    fmtLeft, ls);
 
             if (d2W > 0f)
-            {
                 DrawTextWithEffectsClipped(g, d2Text, font, _pr_delta2Color,
                                            new RectangleF(d2X, textY, d2W, fontH),
                                            fmtLeft, ls);
-            }
         }
 
-
-        // ── Text drawing with LiveSplit-style shadows/outlines ────────────────
+        // =====================================================================
+        // TEXT RENDERING — do not replace with plain g.DrawString
+        // =====================================================================
         //
-        // DrawString by itself does not respect LiveSplit's text outline/shadow
-        // look well enough. This helper mirrors the approach used in TotalTimeloss:
-        // it draws shadows and outlines manually using GraphicsPath.
+        // DrawTextWithEffects reads DropShadows / ShadowsColor / TextOutlineColor
+        // from layout settings via reflection (for version compatibility) and draws
+        // using GraphicsPath.AddString into a huge rectangle to avoid clipping
+        // descenders, outlines, or shadows on letters like p/g/y or symbols.
+        //
+        // DrawTextWithEffectsClipped: sets a clip region for the given rectangle,
+        // then calls DrawTextWithEffects.  Use when text must not overflow a column.
+        //
+        // DrawTextWithEffectsFit: used only in the small PB/Best block, where slight
+        // font scaling is acceptable if the label + time block is too wide.
+
         private static void DrawTextWithEffects(Graphics g, string text, Font font,
                                         Color textColor, RectangleF rect,
                                         StringFormat format,
@@ -725,13 +750,10 @@ namespace LiveSplit.UI.Components
             if (string.IsNullOrEmpty(text) || font == null)
                 return;
 
-            bool hasShadow = GetLayoutSetting(settings, "DropShadows", false);
-            Color shadowColor = GetLayoutSetting(settings, "ShadowsColor", Color.Black);
-            Color outlineColor = GetLayoutSetting(settings, "TextOutlineColor", Color.Transparent);
+            bool  hasShadow  = GetLayoutSetting(settings, "DropShadows",      false);
+            Color shadowColor = GetLayoutSetting(settings, "ShadowsColor",     Color.Black);
+            Color outlineColor= GetLayoutSetting(settings, "TextOutlineColor", Color.Transparent);
 
-            // Convert rectangle alignment into an actual x coordinate, then draw
-            // using a huge layout rectangle like TotalTimeloss/SimpleLabel style.
-            // This avoids clipping shadows/outlines on letters like p/g or symbols.
             SizeF measured = g.MeasureString(text, font);
 
             float x = rect.X;
@@ -744,18 +766,18 @@ namespace LiveSplit.UI.Components
 
             using (var nearFormat = new StringFormat())
             {
-                nearFormat.Alignment = StringAlignment.Near;
+                nearFormat.Alignment     = StringAlignment.Near;
                 nearFormat.LineAlignment = format.LineAlignment;
-                nearFormat.Trimming = StringTrimming.None;
-                nearFormat.FormatFlags = StringFormatFlags.NoWrap;
+                nearFormat.Trimming      = StringTrimming.None;
+                nearFormat.FormatFlags   = StringFormatFlags.NoWrap;
 
                 if (g.TextRenderingHint == TextRenderingHint.AntiAlias && outlineColor.A > 0)
                 {
                     float fontSize = GetFontSize(g, font);
 
-                    using (var path = new GraphicsPath())
-                    using (var outlinePen = new Pen(outlineColor, GetOutlineSize(fontSize)))
-                    using (var textBrush = new SolidBrush(textColor))
+                    using (var path        = new GraphicsPath())
+                    using (var outlinePen  = new Pen(outlineColor, GetOutlineSize(fontSize)))
+                    using (var textBrush   = new SolidBrush(textColor))
                     {
                         outlinePen.LineJoin = LineJoin.Round;
 
@@ -803,8 +825,7 @@ namespace LiveSplit.UI.Components
                                                StringFormat format,
                                                LiveSplit.Options.LayoutSettings settings)
         {
-            if (string.IsNullOrEmpty(text) || font == null)
-                return;
+            if (string.IsNullOrEmpty(text) || font == null) return;
 
             Region oldClip = g.Clip;
             try
@@ -827,26 +848,20 @@ namespace LiveSplit.UI.Components
                                            LiveSplit.Options.LayoutSettings settings,
                                            float minFontPt)
         {
-            if (string.IsNullOrEmpty(text) || baseFont == null)
-                return;
+            if (string.IsNullOrEmpty(text) || baseFont == null) return;
+            if (rect.Width <= 1f) return;
 
-            if (rect.Width <= 1f)
-                return;
+            Font  drawFont    = baseFont;
+            bool  disposeFont = false;
+            float availW      = Math.Max(1f, rect.Width - 1f);
+            float measuredW   = g.MeasureString(text, drawFont).Width;
 
-            Font drawFont = baseFont;
-            bool disposeFont = false;
-
-            // Leave a little horizontal safety room for outlines/shadows.
-            float availableWidth = Math.Max(1f, rect.Width - 1f);
-            float measuredWidth = g.MeasureString(text, drawFont).Width;
-
-            if (measuredWidth > availableWidth && drawFont.Size > minFontPt)
+            if (measuredW > availW && drawFont.Size > minFontPt)
             {
-                float scale = availableWidth / measuredWidth;
+                float scale   = availW / measuredW;
                 float newSize = Math.Max(minFontPt, drawFont.Size * scale);
-
-                drawFont = new Font(baseFont.FontFamily, newSize, baseFont.Style);
-                disposeFont = true;
+                drawFont      = new Font(baseFont.FontFamily, newSize, baseFont.Style);
+                disposeFont   = true;
             }
 
             try
@@ -855,44 +870,24 @@ namespace LiveSplit.UI.Components
             }
             finally
             {
-                if (disposeFont)
-                    drawFont.Dispose();
+                if (disposeFont) drawFont.Dispose();
             }
         }
 
-
+        // ── Reflection helper (version-safe property access) ──────────────────
         private static T GetLayoutSetting<T>(LiveSplit.Options.LayoutSettings settings,
                                              string propertyName, T fallback)
         {
             try
             {
-                var prop = settings.GetType().GetProperty(propertyName, BindingFlags.Public | BindingFlags.Instance);
-                if (prop == null)
-                    return fallback;
-
+                var prop = settings.GetType().GetProperty(
+                    propertyName, BindingFlags.Public | BindingFlags.Instance);
+                if (prop == null) return fallback;
                 object value = prop.GetValue(settings, null);
-                if (value is T)
-                    return (T)value;
+                if (value is T) return (T)value;
             }
-            catch
-            {
-                // Fall back silently. LiveSplit versions may differ slightly.
-            }
-
+            catch { }
             return fallback;
-        }
-
-        private static float GetFontSize(Graphics g, Font font)
-        {
-            if (font.Unit == GraphicsUnit.Point)
-                return font.Size * g.DpiY / 72f;
-
-            return font.Size;
-        }
-
-        private static float GetOutlineSize(float fontSize)
-        {
-            return 2.1f + fontSize * 0.055f;
         }
 
         // ── Background ────────────────────────────────────────────────────────
@@ -910,11 +905,19 @@ namespace LiveSplit.UI.Components
                 using (var br = new LinearGradientBrush(
                     new PointF(0, 0), new PointF(0, height),
                     ls.BackgroundColor, ls.BackgroundColor2))
-                {
                     g.FillRectangle(br, 0, 0, width, height);
-                }
             }
         }
+
+        private static float GetFontSize(Graphics g, Font font)
+        {
+            return font.Unit == GraphicsUnit.Point
+                ? font.Size * g.DpiY / 72f
+                : font.Size;
+        }
+
+        private static float GetOutlineSize(float fontSize)
+            => 2.1f + fontSize * 0.055f;
 
         // =====================================================================
         // HELPERS
@@ -923,70 +926,159 @@ namespace LiveSplit.UI.Components
         private const string Dash = "-";
 
         /// <summary>
-        /// Formats a positive TimeSpan as "S.ff", "M:SS.ff", or "H:MM:SS.ff".
+        /// Formats a positive TimeSpan respecting the chosen accuracy.
         /// Returns Dash for null.
         /// </summary>
-        private static string FormatTime(TimeSpan? t)
+        private static string FormatTime(TimeSpan? t, TimeAccuracy accuracy)
         {
             if (t == null) return Dash;
             TimeSpan ts = t.Value;
+
+            string decimals;
+            switch (accuracy)
+            {
+                case TimeAccuracy.Milliseconds:
+                    decimals = string.Format(".{0:D3}", ts.Milliseconds);
+                    break;
+                case TimeAccuracy.Tenths:
+                    decimals = string.Format(".{0:D1}", ts.Milliseconds / 100);
+                    break;
+                case TimeAccuracy.Seconds:
+                    decimals = string.Empty;
+                    break;
+                default: // Hundredths
+                    decimals = string.Format(".{0:D2}", ts.Milliseconds / 10);
+                    break;
+            }
+
             if (ts.TotalHours >= 1)
-                return string.Format("{0}:{1:D2}:{2:D2}.{3:D2}",
-                    (int)ts.TotalHours, ts.Minutes, ts.Seconds, ts.Milliseconds / 10);
+                return string.Format("{0}:{1:D2}:{2:D2}{3}",
+                    (int)ts.TotalHours, ts.Minutes, ts.Seconds, decimals);
             if (ts.TotalMinutes >= 1)
-                return string.Format("{0}:{1:D2}.{2:D2}",
-                    ts.Minutes, ts.Seconds, ts.Milliseconds / 10);
-            return string.Format("{0}.{1:D2}",
-                ts.Seconds, ts.Milliseconds / 10);
+                return string.Format("{0}:{1:D2}{2}", ts.Minutes, ts.Seconds, decimals);
+            return string.Format("{0}{1}", ts.Seconds, decimals);
+        }
+
+        /// <summary>
+        /// Formats a delta TimeSpan with a leading "+" or "−" sign,
+        /// respecting the chosen accuracy.
+        ///
+        /// Decimals are dropped when the delta is >= 1 minute, to keep
+        /// large deltas compact.  This behavior is intentional and useful
+        /// for wide splits where +12:34.56 would be cluttered.
+        ///
+        /// Returns Dash for null.
+        /// </summary>
+        private static string FormatDelta(TimeSpan? t, TimeAccuracy accuracy)
+        {
+            if (t == null) return Dash;
+
+            TimeSpan ts   = t.Value;
+            string   sign = ts.Ticks >= 0 ? "+" : "−";
+            TimeSpan abs  = ts.Duration();
+
+            // For large deltas, decimals waste too much space — drop them.
+            string decimals;
+            if (abs.TotalMinutes >= 1)
+            {
+                decimals = string.Empty; // always drop decimals at >=1 min
+            }
+            else
+            {
+                switch (accuracy)
+                {
+                    case TimeAccuracy.Milliseconds:
+                        decimals = string.Format(".{0:D3}", abs.Milliseconds);
+                        break;
+                    case TimeAccuracy.Tenths:
+                        decimals = string.Format(".{0:D1}", abs.Milliseconds / 100);
+                        break;
+                    case TimeAccuracy.Seconds:
+                        decimals = string.Empty;
+                        break;
+                    default: // Hundredths
+                        decimals = string.Format(".{0:D2}", abs.Milliseconds / 10);
+                        break;
+                }
+            }
+
+            if (abs.TotalHours >= 1)
+                return string.Format("{0}{1}:{2:D2}:{3:D2}",
+                    sign, (int)abs.TotalHours, abs.Minutes, abs.Seconds);
+            if (abs.TotalMinutes >= 1)
+                return string.Format("{0}{1}:{2:D2}",
+                    sign, (int)abs.TotalMinutes, abs.Seconds);
+            return string.Format("{0}{1}{2}", sign, abs.Seconds, decimals);
         }
 
         private static string RemoveDeltaSign(string text)
         {
-            if (string.IsNullOrEmpty(text))
-                return text;
-
-            // Do not turn the missing-value dash "-" into an empty string.
-            if (text == Dash)
-                return text;
-
+            if (string.IsNullOrEmpty(text) || text == Dash) return text;
             if (text[0] == '+' || text[0] == '−' || text[0] == '-')
                 return text.Substring(1);
-
             return text;
         }
 
+        /// <summary>
+        /// Shortens a delta string to fit within maxWidth pixels.
+        ///
+        /// Shortening strategy (in order):
+        ///   1. Return as-is if it fits.
+        ///   2. Strip decimals (e.g. "+1:24.56" → "+1:24").
+        ///   3. For ≥1 min: use compact minute notation "+1m", "+12m".
+        ///   4. For ≥1 hour: use compact hour notation "+1h".
+        ///   5. Truncate with ellipsis.
+        ///   6. Return empty string.
+        ///
+        /// Never leaves dangling punctuation like "+1:" or "−2:".
+        /// </summary>
         private static string ShortenDeltaToFit(Graphics g, string text, Font font, float maxWidth)
         {
-            if (string.IsNullOrEmpty(text))
-                return text;
-
-            if (maxWidth <= 1f)
-                return string.Empty;
-
+            if (string.IsNullOrEmpty(text)) return text;
+            if (maxWidth <= 1f)             return string.Empty;
             if (text == Dash)
                 return g.MeasureString(text, font).Width <= maxWidth ? text : string.Empty;
 
             if (g.MeasureString(text, font).Width <= maxWidth)
                 return text;
 
+            // Extract sign and numeric body
             string sign = string.Empty;
             string body = text;
-
             if (text[0] == '+' || text[0] == '−' || text[0] == '-')
             {
                 sign = text.Substring(0, 1);
                 body = text.Substring(1);
             }
 
-            // First compact form: remove decimals, but keep the sign.
+            // Step 2: strip decimals
             string noDecimals = RemoveDecimalPart(body);
-            string candidate = sign + noDecimals;
-
+            string candidate  = sign + noDecimals;
             if (!string.IsNullOrEmpty(noDecimals) &&
                 g.MeasureString(candidate, font).Width <= maxWidth)
                 return candidate;
 
-            // Second compact form: progressively shorten the body and add an ellipsis.
+            // Step 3: compact minute/hour notation.
+            // Parse the body to find total minutes / hours.
+            // Body formats: "S", "S.ff", "M:SS", "M:SS.ff", "H:MM:SS", ...
+            int totalMinutes = 0;
+            int totalHours   = 0;
+            ParseDeltaBody(body, out totalMinutes, out totalHours);
+
+            if (totalHours >= 1)
+            {
+                candidate = sign + totalHours + "h";
+                if (g.MeasureString(candidate, font).Width <= maxWidth)
+                    return candidate;
+            }
+            else if (totalMinutes >= 1)
+            {
+                candidate = sign + totalMinutes + "m";
+                if (g.MeasureString(candidate, font).Width <= maxWidth)
+                    return candidate;
+            }
+
+            // Step 4: progressive ellipsis truncation
             for (int len = body.Length - 1; len >= 1; len--)
             {
                 candidate = sign + body.Substring(0, len) + "…";
@@ -998,7 +1090,7 @@ namespace LiveSplit.UI.Components
                     return candidate;
             }
 
-            // Last resort: show only the sign, if it fits.
+            // Step 5: just the sign
             if (!string.IsNullOrEmpty(sign) &&
                 g.MeasureString(sign, font).Width <= maxWidth)
                 return sign;
@@ -1008,44 +1100,47 @@ namespace LiveSplit.UI.Components
 
         private static string RemoveDecimalPart(string text)
         {
-            if (string.IsNullOrEmpty(text))
-                return text;
-
+            if (string.IsNullOrEmpty(text)) return text;
             int dot = text.IndexOf('.');
-            if (dot > 0)
-                return text.Substring(0, dot);
-
+            if (dot > 0) return text.Substring(0, dot);
             return text;
         }
 
         /// <summary>
-        /// Formats a delta TimeSpan with a leading "+" or "−" sign.
-        /// Returns Dash for null.
+        /// Parses a delta body string (without sign) to extract total minutes/hours.
+        /// Handles formats: "S", "S.ff", "M:SS", "M:SS.ff", "H:MM:SS", etc.
         /// </summary>
-        private static string FormatDelta(TimeSpan? t)
+        private static void ParseDeltaBody(string body, out int totalMinutes, out int totalHours)
         {
-            if (t == null) return Dash;
-
-            TimeSpan ts = t.Value;
-            string sign = ts.Ticks >= 0 ? "+" : "−";
-            TimeSpan abs = ts.Duration();
-
-            // For large deltas, decimals waste too much horizontal space.
-            // Keep decimals only under one minute.
-            if (abs.TotalMinutes >= 1)
-                return string.Format("{0}{1}:{2:D2}",
-                    sign, (int)abs.TotalMinutes, abs.Seconds);
-
-            return string.Format("{0}{1}.{2:D2}",
-                sign, abs.Seconds, abs.Milliseconds / 10);
+            totalMinutes = 0;
+            totalHours   = 0;
+            try
+            {
+                // Strip decimals first
+                string clean = RemoveDecimalPart(body);
+                string[] parts = clean.Split(':');
+                if (parts.Length == 1)
+                {
+                    // seconds only
+                }
+                else if (parts.Length == 2)
+                {
+                    // M:SS
+                    int m = int.Parse(parts[0]);
+                    totalMinutes = m;
+                }
+                else if (parts.Length >= 3)
+                {
+                    // H:MM:SS
+                    int h = int.Parse(parts[0]);
+                    int m = int.Parse(parts[1]);
+                    totalHours   = h;
+                    totalMinutes = h * 60 + m;
+                }
+            }
+            catch { }
         }
 
-        /// <summary>
-        /// Maps a delta to a LiveSplit delta color.
-        ///   negative (faster) → AheadGainingTimeColor (green)
-        ///   positive (slower) → BehindLosingTimeColor (red)
-        ///   null              → settings TextColor
-        /// </summary>
         private Color DeltaColor(LiveSplitState state, TimeSpan? delta)
         {
             if (delta == null)         return _settings.TextColor;
@@ -1053,9 +1148,6 @@ namespace LiveSplit.UI.Components
             return state.LayoutSettings.AheadGainingTimeColor;
         }
 
-        /// <summary>
-        /// Short display label for a comparison name.
-        /// </summary>
         private static string AbbreviateComparison(string comparison)
         {
             switch (comparison)

@@ -1,15 +1,16 @@
 // ============================================================================
 // SplitDetailSettings.cs
-// Settings UserControl for the SplitDetail component.
+// Settings panel for the SplitDetail component.
 //
-// All controls are created in code (no .Designer.cs / .resx needed).
+// All controls built in code — no .Designer.cs / .resx needed.
 //
-// Stores:
-//   Mode        — SplitDetailMode enum
-//   Comparison  — any comparison available in the current run
-//   Separator   — character(s) shown between the two deltas
-//   TextColor   — color for left label, "PB"/"Best" labels, separator
-//   TimeColor   — color for right-side time and PB/Best time values
+// Color pickers use SettingsHelper.ColorButtonClick (FlatStyle.Popup),
+// matching the style used by standard LiveSplit components.
+//
+// XML compatibility:
+//   Version 2 (old): stored "Comparison" (was Comparison2), TextColor, TimeColor
+//   Version 3 (new): stores Comparison1, Comparison2, plus all new fields
+//   SetSettings reads both old and new field names for backward compatibility.
 // ============================================================================
 
 using System;
@@ -17,28 +18,72 @@ using System.Drawing;
 using System.Windows.Forms;
 using System.Xml;
 using LiveSplit.Model;
+using LiveSplit.TimeFormatters;
+using LiveSplit.UI;
 
 namespace LiveSplit.UI.Components
 {
     public class SplitDetailSettings : UserControl
     {
-        // ── Public properties (read by the component each draw/update) ────────
-        public SplitDetailMode Mode       { get; private set; } = SplitDetailMode.CurrentSplit;
-        public string          Comparison { get; private set; } = "Best Segments";
-        public string          Separator  { get; private set; } = "|";
+        // =====================================================================
+        // Public properties  (read by SplitDetailComponent every tick)
+        // =====================================================================
 
-        // Colors — default to white to match typical LiveSplit text colors.
-        public Color           TextColor  { get; private set; } = Color.White;
-        public Color           TimeColor  { get; private set; } = Color.White;
+        public SplitDetailMode Mode             { get; private set; } = SplitDetailMode.CurrentSplit;
 
-        // ── Private ───────────────────────────────────────────────────────────
+        // Two independently configurable comparisons.
+        // Comparison1 defaults to PB (left delta / top line).
+        // Comparison2 defaults to Best Segments (right delta / bottom line).
+        public string Comparison1               { get; private set; } = "Personal Best";
+        public string Comparison2               { get; private set; } = "Best Segments";
+
+        // 1 = show only Comparison1 delta / line.
+        // 2 = show both comparisons (default).
+        public int    ComparisonCount           { get; private set; } = 2;
+
+        // Which delta gets space priority when the middle column is tight.
+        // 1 = prioritize Comparison1 delta.
+        // 2 = prioritize Comparison2 delta (default — usually the Best/highlight one).
+        public int    PriorityDelta             { get; private set; } = 2;
+
+        // User-configurable mode labels.
+        public string LabelCurrentSplit         { get; private set; } = "Current Split";
+        public string LabelPrevSplit            { get; private set; } = "Prev Split";
+        public string LabelPrevSeg              { get; private set; } = "Prev Seg.";
+
+        // Empty string = no separator (default, compact layout).
+        // Non-empty    = drawn between the two deltas with colGap spacing on each side.
+        public string Separator                 { get; private set; } = string.Empty;
+
+        // Internal horizontal spacing between label/delta/time elements (px).
+        // Does NOT affect outer padding.
+        public float  ColumnSpacing             { get; private set; } = 3f;
+
+        // Decimal accuracy for displayed times and deltas.
+        public TimeAccuracy Accuracy            { get; private set; } = TimeAccuracy.Hundredths;
+
+        // Colors.
+        public Color  TextColor                 { get; private set; } = Color.White;
+        public Color  TimeColor                 { get; private set; } = Color.White;
+
+        // =====================================================================
+        // Private controls
+        // =====================================================================
         private readonly LiveSplitState _state;
 
-        private ComboBox _modeCombo;
-        private ComboBox _compCombo;
-        private TextBox  _sepBox;
-        private Button   _textColorBtn;
-        private Button   _timeColorBtn;
+        private ComboBox      _modeCombo;
+        private ComboBox      _cmp1Combo;
+        private ComboBox      _cmp2Combo;
+        private ComboBox      _cmpCountCombo;
+        private ComboBox      _priorityCombo;
+        private TextBox       _labelCurrentBox;
+        private TextBox       _labelPrevSplitBox;
+        private TextBox       _labelPrevSegBox;
+        private TextBox       _sepBox;
+        private NumericUpDown _spacingNum;
+        private RadioButton   _rdoHundredths, _rdoTenths, _rdoSeconds, _rdoMilliseconds;
+        private Button        _textColorBtn;
+        private Button        _timeColorBtn;
 
         // ── Constructor ───────────────────────────────────────────────────────
         public SplitDetailSettings(LiveSplitState state)
@@ -48,7 +93,7 @@ namespace LiveSplit.UI.Components
         }
 
         // =====================================================================
-        // UI Construction
+        // UI construction
         // =====================================================================
         private void BuildUI()
         {
@@ -56,103 +101,250 @@ namespace LiveSplit.UI.Components
             AutoScroll = true;
             Padding    = new Padding(10);
 
-            var table = new TableLayoutPanel
+            // Outer flow: sections stack top-to-bottom
+            var flow = new FlowLayoutPanel
+            {
+                AutoSize      = true,
+                FlowDirection = FlowDirection.TopDown,
+                WrapContents  = false,
+                Dock          = DockStyle.Fill,
+            };
+
+            flow.Controls.Add(MakeSection("Mode & Labels",    BuildModeLabelSection()));
+            flow.Controls.Add(MakeSection("Comparisons",      BuildComparisonSection()));
+            flow.Controls.Add(MakeSection("Layout",           BuildLayoutSection()));
+            flow.Controls.Add(MakeSection("Accuracy",         BuildAccuracySection()));
+            flow.Controls.Add(MakeSection("Colors",           BuildColorSection()));
+
+            Controls.Add(flow);
+        }
+
+        // ── Section builder ───────────────────────────────────────────────────
+        private static GroupBox MakeSection(string title, Control content)
+        {
+            var gb = new GroupBox
+            {
+                Text     = title,
+                AutoSize = true,
+                Margin   = new Padding(0, 0, 0, 6),
+                Padding  = new Padding(6),
+            };
+            content.Dock = DockStyle.Fill;
+            gb.Controls.Add(content);
+            return gb;
+        }
+
+        private static TableLayoutPanel MakeGrid(int rows)
+        {
+            var t = new TableLayoutPanel
             {
                 AutoSize    = true,
                 ColumnCount = 2,
-                RowCount    = 5,   // Mode / Comparison / Separator / TextColor / TimeColor
+                RowCount    = rows,
                 Padding     = Padding.Empty,
                 Margin      = Padding.Empty,
             };
-            table.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 110f));
-            table.ColumnStyles.Add(new ColumnStyle(SizeType.Percent,  100f));
+            t.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 120f));
+            t.ColumnStyles.Add(new ColumnStyle(SizeType.Percent,  100f));
+            return t;
+        }
 
-            int row = 0;
+        // ── Mode & Labels ─────────────────────────────────────────────────────
+        private Control BuildModeLabelSection()
+        {
+            var t = MakeGrid(5);
 
-            // ── Mode ─────────────────────────────────────────────────────────
-            table.Controls.Add(MakeLabel("Mode:"), 0, row);
-
-            _modeCombo = new ComboBox
-            {
-                DropDownStyle = ComboBoxStyle.DropDownList,
-                Dock          = DockStyle.Fill,
-            };
-            _modeCombo.Items.AddRange(new object[]
-            {
-                "Current Split",
-                "Prior Split",
-                "Prior Subsplit",
-            });
+            // Mode
+            t.Controls.Add(MakeLbl("Mode:"), 0, 0);
+            _modeCombo = MakeCombo("Current Split", "Prev Split", "Prev Seg.");
             _modeCombo.SelectedIndex = (int)Mode;
             _modeCombo.SelectedIndexChanged += (s, e) =>
                 Mode = (SplitDetailMode)_modeCombo.SelectedIndex;
-            table.Controls.Add(_modeCombo, 1, row);
-            row++;
+            t.Controls.Add(_modeCombo, 1, 0);
 
-            // ── Comparison ───────────────────────────────────────────────────
-            table.Controls.Add(MakeLabel("Comparison:"), 0, row);
+            // Label: Current Split
+            t.Controls.Add(MakeLbl("Label – Current:"), 0, 1);
+            _labelCurrentBox = MakeTextBox(LabelCurrentSplit, 30);
+            _labelCurrentBox.TextChanged += (s, e) => LabelCurrentSplit = _labelCurrentBox.Text;
+            t.Controls.Add(_labelCurrentBox, 1, 1);
 
-            _compCombo = new ComboBox
+            // Label: Prev Split
+            t.Controls.Add(MakeLbl("Label – Prev Split:"), 0, 2);
+            _labelPrevSplitBox = MakeTextBox(LabelPrevSplit, 30);
+            _labelPrevSplitBox.TextChanged += (s, e) => LabelPrevSplit = _labelPrevSplitBox.Text;
+            t.Controls.Add(_labelPrevSplitBox, 1, 2);
+
+            // Label: Prev Seg.
+            t.Controls.Add(MakeLbl("Label – Prev Seg.:"), 0, 3);
+            _labelPrevSegBox = MakeTextBox(LabelPrevSeg, 30);
+            _labelPrevSegBox.TextChanged += (s, e) => LabelPrevSeg = _labelPrevSegBox.Text;
+            t.Controls.Add(_labelPrevSegBox, 1, 3);
+
+            // Help note
+            var note = new Label
             {
-                DropDownStyle = ComboBoxStyle.DropDownList,
-                Dock          = DockStyle.Fill,
-            };
-            _compCombo.SelectedIndexChanged += (s, e) =>
-            {
-                if (_compCombo.SelectedItem != null)
-                    Comparison = _compCombo.SelectedItem.ToString();
-            };
-            table.Controls.Add(_compCombo, 1, row);
-            row++;
-
-            // ── Separator ────────────────────────────────────────────────────
-            table.Controls.Add(MakeLabel("Separator:"), 0, row);
-
-            _sepBox = new TextBox { Text = Separator, MaxLength = 5, Width = 40 };
-            _sepBox.TextChanged += (s, e) =>
-                Separator = string.IsNullOrEmpty(_sepBox.Text) ? "|" : _sepBox.Text;
-            table.Controls.Add(_sepBox, 1, row);
-            row++;
-
-            // ── Text Color ───────────────────────────────────────────────────
-            // Applies to: mode label, "PB"/"Best" labels, separator.
-            table.Controls.Add(MakeLabel("Text Color:"), 0, row);
-
-            _textColorBtn = MakeColorButton(TextColor, () => TextColor,
-                                            c => TextColor = c);
-            table.Controls.Add(_textColorBtn, 1, row);
-            row++;
-
-            // ── Time Color ───────────────────────────────────────────────────
-            // Applies to: right-side time, PB/Best time values.
-            table.Controls.Add(MakeLabel("Time Color:"), 0, row);
-
-            _timeColorBtn = MakeColorButton(TimeColor, () => TimeColor,
-                                            c => TimeColor = c);
-            table.Controls.Add(_timeColorBtn, 1, row);
-            row++;
-
-            // ── Help text ────────────────────────────────────────────────────
-            var help = new Label
-            {
-                Text =
-                    "Subsplits are detected by the \"-\" prefix on segment names.\r\n" +
-                    "If your splits use a different prefix, change SubsplitPrefix\r\n" +
-                    "in SplitDetailComponent.cs.\r\n\r\n" +
-                    "Delta colors always follow LiveSplit's ahead/behind colors.",
+                Text      = "Labels are shown in the left column of the component.",
                 AutoSize  = true,
                 ForeColor = SystemColors.GrayText,
-                Margin    = new Padding(0, 10, 0, 0),
             };
-            table.SetColumnSpan(help, 2);
-            table.Controls.Add(help, 0, row);
+            t.SetColumnSpan(note, 2);
+            t.Controls.Add(note, 0, 4);
 
-            Controls.Add(table);
+            return t;
+        }
+
+        // ── Comparisons ───────────────────────────────────────────────────────
+        private Control BuildComparisonSection()
+        {
+            var t = MakeGrid(5);
+
+            // Comparison 1
+            t.Controls.Add(MakeLbl("Comparison 1:"), 0, 0);
+            _cmp1Combo = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Dock = DockStyle.Fill };
+            _cmp1Combo.SelectedIndexChanged += (s, e) =>
+            {
+                if (_cmp1Combo.SelectedItem != null)
+                    Comparison1 = _cmp1Combo.SelectedItem.ToString();
+            };
+            t.Controls.Add(_cmp1Combo, 1, 0);
+
+            // Comparison 2
+            t.Controls.Add(MakeLbl("Comparison 2:"), 0, 1);
+            _cmp2Combo = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Dock = DockStyle.Fill };
+            _cmp2Combo.SelectedIndexChanged += (s, e) =>
+            {
+                if (_cmp2Combo.SelectedItem != null)
+                    Comparison2 = _cmp2Combo.SelectedItem.ToString();
+            };
+            t.Controls.Add(_cmp2Combo, 1, 1);
+
+            // How many comparisons to show
+            t.Controls.Add(MakeLbl("Show comparisons:"), 0, 2);
+            _cmpCountCombo = MakeCombo("1 (Comparison 1 only)", "2 (both)");
+            _cmpCountCombo.SelectedIndex = ComparisonCount - 1;
+            _cmpCountCombo.SelectedIndexChanged += (s, e) =>
+                ComparisonCount = _cmpCountCombo.SelectedIndex + 1;
+            t.Controls.Add(_cmpCountCombo, 1, 2);
+
+            // Priority delta
+            t.Controls.Add(MakeLbl("Priority delta:"), 0, 3);
+            _priorityCombo = MakeCombo("Comparison 1", "Comparison 2");
+            _priorityCombo.SelectedIndex = PriorityDelta - 1;
+            _priorityCombo.SelectedIndexChanged += (s, e) =>
+                PriorityDelta = _priorityCombo.SelectedIndex + 1;
+            t.Controls.Add(_priorityCombo, 1, 3);
+
+            var note = new Label
+            {
+                Text      = "Priority delta keeps its full value when space is tight.\n" +
+                            "Comparison 1 = left delta / top line.\n" +
+                            "Comparison 2 = right delta / bottom line.",
+                AutoSize  = true,
+                ForeColor = SystemColors.GrayText,
+            };
+            t.SetColumnSpan(note, 2);
+            t.Controls.Add(note, 0, 4);
+
+            return t;
+        }
+
+        // ── Layout ────────────────────────────────────────────────────────────
+        private Control BuildLayoutSection()
+        {
+            var t = MakeGrid(3);
+
+            // Separator
+            t.Controls.Add(MakeLbl("Separator:"), 0, 0);
+            _sepBox = MakeTextBox(Separator, 5);
+            _sepBox.TextChanged += (s, e) => Separator = _sepBox.Text; // allow empty
+            t.Controls.Add(_sepBox, 1, 0);
+
+            // Column spacing
+            t.Controls.Add(MakeLbl("Column spacing (px):"), 0, 1);
+            _spacingNum = new NumericUpDown
+            {
+                Minimum       = 0,
+                Maximum       = 30,
+                DecimalPlaces = 0,
+                Value         = (decimal)ColumnSpacing,
+                Width         = 60,
+            };
+            _spacingNum.ValueChanged += (s, e) => ColumnSpacing = (float)_spacingNum.Value;
+            t.Controls.Add(_spacingNum, 1, 1);
+
+            var note = new Label
+            {
+                Text      = "Separator: empty = no separator, just a small gap.\n" +
+                            "Column spacing: gap between columns and around separator.\n" +
+                            "Outer padding is not affected.",
+                AutoSize  = true,
+                ForeColor = SystemColors.GrayText,
+            };
+            t.SetColumnSpan(note, 2);
+            t.Controls.Add(note, 0, 2);
+
+            return t;
+        }
+
+        // ── Accuracy ─────────────────────────────────────────────────────────
+        private Control BuildAccuracySection()
+        {
+            var flow = new FlowLayoutPanel
+            {
+                AutoSize      = true,
+                FlowDirection = FlowDirection.LeftToRight,
+                WrapContents  = false,
+            };
+
+            _rdoSeconds     = new RadioButton { Text = "Seconds",      AutoSize = true, Margin = new Padding(0, 0, 8, 0) };
+            _rdoTenths      = new RadioButton { Text = "Tenths",       AutoSize = true, Margin = new Padding(0, 0, 8, 0) };
+            _rdoHundredths  = new RadioButton { Text = "Hundredths",   AutoSize = true, Margin = new Padding(0, 0, 8, 0) };
+            _rdoMilliseconds= new RadioButton { Text = "Milliseconds", AutoSize = true };
+
+            _rdoHundredths.Checked = true;
+
+            _rdoSeconds.CheckedChanged      += (s, e) => { if (_rdoSeconds.Checked)      Accuracy = TimeAccuracy.Seconds; };
+            _rdoTenths.CheckedChanged       += (s, e) => { if (_rdoTenths.Checked)       Accuracy = TimeAccuracy.Tenths; };
+            _rdoHundredths.CheckedChanged   += (s, e) => { if (_rdoHundredths.Checked)   Accuracy = TimeAccuracy.Hundredths; };
+            _rdoMilliseconds.CheckedChanged += (s, e) => { if (_rdoMilliseconds.Checked) Accuracy = TimeAccuracy.Milliseconds; };
+
+            flow.Controls.Add(_rdoSeconds);
+            flow.Controls.Add(_rdoTenths);
+            flow.Controls.Add(_rdoHundredths);
+            flow.Controls.Add(_rdoMilliseconds);
+            return flow;
+        }
+
+        // ── Colors ────────────────────────────────────────────────────────────
+        private Control BuildColorSection()
+        {
+            var t = MakeGrid(2);
+
+            // Text Color (label, separator)
+            t.Controls.Add(MakeLbl("Text Color:"), 0, 0);
+            _textColorBtn = MakeColorBtn(TextColor);
+            _textColorBtn.Click += (s, e) =>
+            {
+                SettingsHelper.ColorButtonClick(_textColorBtn, this);
+                TextColor = _textColorBtn.BackColor;
+            };
+            t.Controls.Add(_textColorBtn, 1, 0);
+
+            // Time Color (right time, PB/Best values)
+            t.Controls.Add(MakeLbl("Time Color:"), 0, 1);
+            _timeColorBtn = MakeColorBtn(TimeColor);
+            _timeColorBtn.Click += (s, e) =>
+            {
+                SettingsHelper.ColorButtonClick(_timeColorBtn, this);
+                TimeColor = _timeColorBtn.BackColor;
+            };
+            t.Controls.Add(_timeColorBtn, 1, 1);
+
+            return t;
         }
 
         // ── UI helpers ────────────────────────────────────────────────────────
-
-        private static Label MakeLabel(string text) => new Label
+        private static Label MakeLbl(string text) => new Label
         {
             Text      = text,
             AutoSize  = true,
@@ -160,58 +352,55 @@ namespace LiveSplit.UI.Components
             TextAlign = ContentAlignment.MiddleLeft,
         };
 
-        /// <summary>
-        /// Creates a Button whose BackColor reflects the current color.
-        /// Clicking it opens a ColorDialog and writes the result to the property.
-        /// </summary>
-        private Button MakeColorButton(Color initial,
-                                        Func<Color> getter,
-                                        Action<Color> setter)
+        private static ComboBox MakeCombo(params string[] items)
         {
-            var btn = new Button
-            {
-                BackColor = initial,
-                Width     = 50,
-                Height    = 23,
-                FlatStyle = FlatStyle.Flat,
-            };
-            btn.Click += (s, e) =>
-            {
-                using (var dlg = new ColorDialog { Color = getter() })
-                {
-                    if (dlg.ShowDialog() == DialogResult.OK)
-                    {
-                        setter(dlg.Color);
-                        btn.BackColor = dlg.Color;
-                    }
-                }
-            };
-            return btn;
+            var c = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Dock = DockStyle.Fill };
+            c.Items.AddRange(items);
+            return c;
         }
+
+        private static TextBox MakeTextBox(string text, int maxLength)
+            => new TextBox { Text = text, MaxLength = maxLength, Dock = DockStyle.Fill };
+
+        /// <summary>
+        /// Creates a color-picker button in LiveSplit's standard Popup style.
+        /// Wired to SettingsHelper.ColorButtonClick in the section builder above.
+        /// </summary>
+        private static Button MakeColorBtn(Color initial) => new Button
+        {
+            BackColor            = initial,
+            FlatStyle            = FlatStyle.Popup,
+            UseVisualStyleBackColor = false,
+            Width                = 23,
+            Height               = 23,
+        };
 
         // =====================================================================
         // Comparison list refresh
         // =====================================================================
 
         /// <summary>
-        /// Populates the Comparison drop-down from the currently loaded run.
-        /// Call every time the settings panel is opened.
+        /// Repopulates both comparison dropdowns from the currently loaded run.
+        /// Must be called each time the settings panel is opened.
         /// </summary>
         public void RefreshComparisons()
         {
-            string selected = Comparison;
-            _compCombo.Items.Clear();
+            PopulateCombo(_cmp1Combo, Comparison1);
+            PopulateCombo(_cmp2Combo, Comparison2);
+        }
 
+        private void PopulateCombo(ComboBox combo, string selected)
+        {
+            combo.Items.Clear();
             if (_state?.Run != null)
             {
                 foreach (string comp in _state.Run.Comparisons)
-                    _compCombo.Items.Add(comp);
+                    combo.Items.Add(comp);
             }
-
-            if (!string.IsNullOrEmpty(selected) && _compCombo.Items.Contains(selected))
-                _compCombo.SelectedItem = selected;
-            else if (_compCombo.Items.Count > 0)
-                _compCombo.SelectedIndex = 0;
+            if (!string.IsNullOrEmpty(selected) && combo.Items.Contains(selected))
+                combo.SelectedItem = selected;
+            else if (combo.Items.Count > 0)
+                combo.SelectedIndex = 0;
         }
 
         // =====================================================================
@@ -221,92 +410,139 @@ namespace LiveSplit.UI.Components
         public XmlNode GetSettings(XmlDocument document)
         {
             XmlElement root = document.CreateElement("Settings");
-            Append(document, root, "Version",    "2");
-            Append(document, root, "Mode",       Mode.ToString());
-            Append(document, root, "Comparison", Comparison);
-            Append(document, root, "Separator",  Separator);
-            Append(document, root, "TextColor",  ColorToString(TextColor));
-            Append(document, root, "TimeColor",  ColorToString(TimeColor));
+            W(document, root, "Version",           "3");
+            W(document, root, "Mode",              Mode.ToString());
+            W(document, root, "Comparison1",       Comparison1);
+            W(document, root, "Comparison2",       Comparison2);
+            W(document, root, "ComparisonCount",   ComparisonCount.ToString());
+            W(document, root, "PriorityDelta",     PriorityDelta.ToString());
+            W(document, root, "LabelCurrentSplit", LabelCurrentSplit);
+            W(document, root, "LabelPrevSplit",    LabelPrevSplit);
+            W(document, root, "LabelPrevSeg",      LabelPrevSeg);
+            W(document, root, "Separator",         Separator);
+            W(document, root, "ColumnSpacing",     ColumnSpacing.ToString(System.Globalization.CultureInfo.InvariantCulture));
+            W(document, root, "Accuracy",          Accuracy.ToString());
+            W(document, root, "TextColor",         ColorToHex(TextColor));
+            W(document, root, "TimeColor",         ColorToHex(TimeColor));
             return root;
         }
 
-        public void SetSettings(XmlNode settings)
+        public void SetSettings(XmlNode node)
         {
-            if (settings == null) return;
+            if (node == null) return;
 
             // Mode
-            string modeStr = Read(settings, "Mode");
+            string modeStr = R(node, "Mode");
             if (modeStr != null && Enum.TryParse(modeStr, out SplitDetailMode m))
             {
                 Mode = m;
                 _modeCombo.SelectedIndex = (int)Mode;
             }
 
-            // Comparison (combo may not be populated yet — RefreshComparisons handles it)
-            string comp = Read(settings, "Comparison");
-            if (!string.IsNullOrEmpty(comp))
+            // Comparison1 — new field.  Fall back to "Personal Best" if absent.
+            string c1 = R(node, "Comparison1");
+            if (!string.IsNullOrEmpty(c1))
             {
-                Comparison = comp;
-                if (_compCombo.Items.Contains(comp))
-                    _compCombo.SelectedItem = comp;
+                Comparison1 = c1;
+                if (_cmp1Combo.Items.Contains(c1)) _cmp1Combo.SelectedItem = c1;
             }
 
-            // Separator
-            string sep = Read(settings, "Separator");
-            if (!string.IsNullOrEmpty(sep))
+            // Comparison2 — new field.  For backward compat also try old "Comparison".
+            string c2 = R(node, "Comparison2") ?? R(node, "Comparison");
+            if (!string.IsNullOrEmpty(c2))
             {
-                Separator    = sep;
-                _sepBox.Text = sep;
+                Comparison2 = c2;
+                if (_cmp2Combo.Items.Contains(c2)) _cmp2Combo.SelectedItem = c2;
             }
 
-            // Text Color
-            string textColorStr = Read(settings, "TextColor");
-            if (!string.IsNullOrEmpty(textColorStr))
+            // ComparisonCount
+            string ccStr = R(node, "ComparisonCount");
+            if (int.TryParse(ccStr, out int cc) && (cc == 1 || cc == 2))
             {
-                Color c = StringToColor(textColorStr);
-                TextColor          = c;
-                _textColorBtn.BackColor = c;
+                ComparisonCount = cc;
+                _cmpCountCombo.SelectedIndex = cc - 1;
             }
 
-            // Time Color
-            string timeColorStr = Read(settings, "TimeColor");
-            if (!string.IsNullOrEmpty(timeColorStr))
+            // PriorityDelta
+            string prStr = R(node, "PriorityDelta");
+            if (int.TryParse(prStr, out int pr) && (pr == 1 || pr == 2))
             {
-                Color c = StringToColor(timeColorStr);
-                TimeColor          = c;
-                _timeColorBtn.BackColor = c;
+                PriorityDelta = pr;
+                _priorityCombo.SelectedIndex = pr - 1;
+            }
+
+            // Labels
+            string lcs = R(node, "LabelCurrentSplit");
+            if (!string.IsNullOrEmpty(lcs)) { LabelCurrentSplit = lcs; _labelCurrentBox.Text = lcs; }
+
+            string lps = R(node, "LabelPrevSplit");
+            if (!string.IsNullOrEmpty(lps)) { LabelPrevSplit = lps; _labelPrevSplitBox.Text = lps; }
+
+            string lpsg = R(node, "LabelPrevSeg");
+            if (!string.IsNullOrEmpty(lpsg)) { LabelPrevSeg = lpsg; _labelPrevSegBox.Text = lpsg; }
+
+            // Separator — allow empty string (no separator is valid)
+            string sep = node["Separator"]?.InnerText;   // don't use R() which skips null
+            if (sep != null) { Separator = sep; _sepBox.Text = sep; }
+
+            // Column spacing
+            string spacStr = R(node, "ColumnSpacing");
+            if (!string.IsNullOrEmpty(spacStr) &&
+                float.TryParse(spacStr, System.Globalization.NumberStyles.Float,
+                               System.Globalization.CultureInfo.InvariantCulture, out float sp))
+            {
+                ColumnSpacing    = Math.Max(0f, sp);
+                _spacingNum.Value = (decimal)Math.Min(30f, ColumnSpacing);
+            }
+
+            // Accuracy
+            string accStr = R(node, "Accuracy");
+            if (!string.IsNullOrEmpty(accStr) &&
+                Enum.TryParse(accStr, out TimeAccuracy acc))
+            {
+                Accuracy = acc;
+                _rdoSeconds.Checked      = acc == TimeAccuracy.Seconds;
+                _rdoTenths.Checked       = acc == TimeAccuracy.Tenths;
+                _rdoHundredths.Checked   = acc == TimeAccuracy.Hundredths;
+                _rdoMilliseconds.Checked = acc == TimeAccuracy.Milliseconds;
+            }
+
+            // Colors
+            string tc = R(node, "TextColor");
+            if (!string.IsNullOrEmpty(tc))
+            {
+                TextColor = HexToColor(tc);
+                _textColorBtn.BackColor = TextColor;
+            }
+
+            string mc = R(node, "TimeColor");
+            if (!string.IsNullOrEmpty(mc))
+            {
+                TimeColor = HexToColor(mc);
+                _timeColorBtn.BackColor = TimeColor;
             }
         }
 
         // ── XML helpers ───────────────────────────────────────────────────────
-        private static void Append(XmlDocument doc, XmlElement parent,
-                                    string name, string value)
+        private static void W(XmlDocument doc, XmlElement parent, string name, string value)
         {
             var el = doc.CreateElement(name);
             el.InnerText = value ?? string.Empty;
             parent.AppendChild(el);
         }
 
-        private static string Read(XmlNode parent, string childName) =>
-            parent[childName]?.InnerText;
-
-        // ── Color serialization ───────────────────────────────────────────────
-        // Stored as ARGB hex: "FFFFFFFF" = opaque white.
-
-        private static string ColorToString(Color c) =>
-            c.ToArgb().ToString("X8");
-
-        private static Color StringToColor(string s)
+        private static string R(XmlNode parent, string childName)
         {
-            try
-            {
-                int argb = Convert.ToInt32(s, 16);
-                return Color.FromArgb(argb);
-            }
-            catch
-            {
-                return Color.White; // fallback on parse error
-            }
+            string s = parent[childName]?.InnerText;
+            return string.IsNullOrEmpty(s) ? null : s;
+        }
+
+        // ── Color serialization (ARGB hex, e.g. "FFFFFFFF") ─────────────────
+        private static string ColorToHex(Color c)  => c.ToArgb().ToString("X8");
+        private static Color  HexToColor(string s)
+        {
+            try   { return Color.FromArgb(Convert.ToInt32(s, 16)); }
+            catch { return Color.White; }
         }
     }
 }
