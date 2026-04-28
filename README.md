@@ -1,144 +1,256 @@
 # SplitDetail — LiveSplit Component
 
-A one-row LiveSplit component that shows timing information for the current or
-prior **parent split group**, with full Subsplits support.
+SplitDetail is a compact, subsplit-aware LiveSplit component that shows timing details for the current split group, the previous split group, or the previous segment/subsplit.
+
+It is designed for runners who use Subsplits and want cleaner timing information than LiveSplit’s default Detailed Timer / Previous Segment combination can provide.
 
 ---
 
-## Modes
+## What it does
 
-| Mode | Left label | Middle | Right |
-|------|-----------|--------|-------|
-| **Current Split** | `Current Split` | `PB: 12.34`  `Best: 11.90` | Live group timer `8.52` |
-| **Prior Split** | `Prior Split` | `+2.31  \| +5.84` (delta vs PB, delta vs comparison) | Actual group time `42.18` |
-| **Prior Subsplit** | `Prior Subsplit` | `+0.44  \| +1.20` | Actual subsplit time `9.76` |
+SplitDetail can be added multiple times to a layout. Each instance can use a different mode.
+
+| Mode | What it shows |
+|---|---|
+| **Current Split** | The live elapsed time of the current parent split group, plus comparison times such as `PB:` and `Best:`. |
+| **Prev Split** | The last completed parent split group: actual time on the right, comparison deltas in the middle. |
+| **Prev Seg.** | The last completed individual segment/subsplit: actual time on the right, comparison deltas in the middle. |
+
+When a prior-mode component detects that the **current active** split or segment is losing time, it can temporarily switch to a live display:
+
+| Normal label | Live label | Meaning |
+|---|---|---|
+| `Prev Split` | `Live Split` | Shows live deltas for the current active split group. |
+| `Prev Seg.` | `Live Seg.` | Shows live deltas for the current active segment/subsplit. |
+
+After the runner splits, the component returns to the normal previous-completed display.
 
 ---
 
-## Building
+## Example layouts
 
-### Requirements
+A common setup is to add SplitDetail three times:
 
-- Visual Studio 2019+ (or MSBuild 15+)
-- .NET Framework 4.6.1 SDK
-- LiveSplit installed
-
-### Steps
-
-1. Open `SplitDetail.csproj` in Visual Studio.
-2. Right-click **References → Add Reference → Browse**.
-3. Navigate to your LiveSplit folder and select `LiveSplit.Core.dll`.
-4. Build in **Release** mode.
-5. Copy `bin\Release\LiveSplit.SplitDetail.dll` into your LiveSplit
-   `Components\` folder.
-6. Restart LiveSplit, open Layout Editor, click `+`, find **SplitDetail**
-   under Comparison.
-
-### Alternative: MSBuild with LiveSplitPath
-
-```bat
-msbuild SplitDetail.csproj /p:Configuration=Release /p:LiveSplitPath="C:\LiveSplit\"
+```text
+Current Split    PB:   1:46.67        1:20.99
+                 Best: 1:36.97
+Prev Seg.        -16.49  -16.41       1.04
+Prev Split       +3m     +3:11        4:48.35
 ```
+
+You can also use only one instance, for example as a more configurable replacement for Previous Segment.
+
+---
+
+## Features
+
+- Subsplit-aware parent split group detection.
+- `Current Split`, `Prev Split`, and `Prev Seg.` modes.
+- Temporary `Live Split` / `Live Seg.` display when the active split or segment is losing time.
+- One-comparison or two-comparison display.
+- Fully selectable comparisons, including custom LiveSplit comparisons.
+- Priority delta setting for tight layouts.
+- Optional separator between deltas.
+- Configurable internal column spacing.
+- Configurable accuracy: seconds, tenths, hundredths, milliseconds.
+- Compact shortening behavior for large deltas.
+- Gold delta coloring for new bests.
+- LiveSplit-style text shadows and outlines.
+- Dynamic Layout Editor names, such as `SplitDetail - Current Split`.
+- Appears under `Information` in the Layout Editor component picker.
 
 ---
 
 ## Settings
 
-| Setting | Default | Description |
-|---------|---------|-------------|
-| Mode | Current Split | Which range to display |
-| Comparison | Best Segments | Which comparison to show in the middle column |
-| Separator | `\|` | Character between the two delta values (Prior modes) |
+### Mode & Labels
 
-Comparison choices are read directly from the open run file, so any comparison
-LiveSplit knows about (Average Segments, Balanced PB, custom comparisons, etc.)
-will appear automatically.
+| Setting | Default | Description |
+|---|---:|---|
+| **Mode** | `Current Split` | Chooses what this instance displays. |
+| **Label - Current** | `Current Split` | Label used for Current Split mode. |
+| **Label - Split** | `Split` | Suffix used to build `Prev Split` and `Live Split`. |
+| **Label - Segment** | `Seg.` | Suffix used to build `Prev Seg.` and `Live Seg.`. |
+
+SplitDetail automatically builds the previous/live labels:
+
+```text
+Prev + Split suffix  → Prev Split
+Live + Split suffix  → Live Split
+Prev + Segment suffix → Prev Seg.
+Live + Segment suffix → Live Seg.
+```
+
+If you prefer wider labels, change the suffixes. For example, `Segment` gives `Prev Segment` and `Live Segment`.
+
+### Comparisons
+
+| Setting | Default | Description |
+|---|---:|---|
+| **Comparison 1** | `Personal Best` | First comparison used for Current Split values and prior/live deltas. |
+| **Comparison 2** | `Best Segments` | Second comparison used when showing two comparisons. |
+| **Show comparisons** | `2 (both)` | Choose one or two comparison values/deltas. |
+| **Priority delta** | `Comparison 2` | Which delta is preserved first when horizontal space is tight. |
+
+Comparison choices are read from the active run, so custom comparisons can be used.
+
+### Layout
+
+| Setting | Default | Description |
+|---|---:|---|
+| **Separator** | empty | Optional separator between deltas. Empty means no separator. |
+| **Column spacing (px)** | `3` | Internal horizontal spacing between labels, deltas, separator, and time. This does not change outer padding or vertical height. |
+
+Examples:
+
+```text
+Separator empty: +1.21 +1.11
+Separator |:     +1.21 | +1.11
+Separator ·:     +1.21 · +1.11
+```
+
+### Accuracy
+
+| Setting | Description |
+|---|---|
+| **Seconds** | No decimals. |
+| **Tenths** | One decimal. |
+| **Hundredths** | Two decimals. |
+| **Milliseconds** | Three decimals. |
+
+When space is tight, SplitDetail shortens values while keeping them readable. For example:
+
+```text
++57.530 → +57.53 → +57.5 → +57
++3:11   → +3m
++1:02:30 → +1h
+```
+
+It avoids unreadable forms such as `+3:` or a lone `+`.
+
+### Colors
+
+| Setting | Description |
+|---|---|
+| **Text Color** | Label color. |
+| **Time Color** | Right-side time and Current Split comparison value color. |
+
+Delta colors follow LiveSplit’s ahead/behind colors. Gold deltas use the layout’s gold/best-segment color where available.
 
 ---
 
-## Subsplits Convention
+## Subsplits convention
 
-SplitDetail detects groups using the standard naming prefix used by LiveSplit's
-Subsplits component:
+SplitDetail detects subsplit groups using the same naming convention as LiveSplit’s Subsplits component:
 
-```
--Room 1      ← child subsplit (starts with "-")
+```text
+-Room 1      ← child subsplit
 -Room 2      ← child subsplit
-Castle       ← parent/header (no prefix) — group spans all three
+Castle       ← parent split group/header
 ```
 
-If your run uses a different prefix (e.g. `{-}`), change the constant at the
-top of `SplitDetailComponent.cs`:
+A child subsplit starts with `-`. The parent/header does not.
+
+If your splits use a different prefix, change this constant in `SplitDetailComponent.cs`:
 
 ```csharp
 private const string SubsplitPrefix = "-";
 ```
 
-If your splits have no subsplits at all, every segment is treated as its own
-group of size 1 — the component degrades gracefully.
+If a run does not use subsplits, every segment is treated as its own group.
 
 ---
 
-## Modifying the Component
+## Installation
 
-### Key functions to know
+1. Build the project in **Release** mode.
+2. Copy the compiled DLL:
 
-| Function | File | What it does |
-|----------|------|--------------|
-| `GetGroupRange(run, index)` | `SplitDetailComponent.cs` | Core group detection — change subsplit logic here |
-| `GetCurrentGroupRange(state)` | same | Finds the active group |
-| `GetPriorGroupRange(state)` | same | Finds the last completed group |
-| `GetPriorSubsplitIndex(state)` | same | Finds the last completed individual segment |
-| `GetCompletedRangeTime(...)` | same | Current run time for a completed range |
-| `GetActiveRangeTime(...)` | same | Live elapsed time for the active range |
-| `GetComparisonRangeTime(...)` | same | Comparison time for any range |
-| `CalcCurrentSplit(...)` | same | Mode 1 display logic |
-| `CalcPriorSplit(...)` | same | Mode 2 display logic |
-| `CalcPriorSubsplit(...)` | same | Mode 3 display logic |
-| `DrawRow(...)` | same | All rendering — change column widths, fonts, colors here |
-| `AbbreviateComparison(...)` | same | Short labels for comparison names |
-| `FormatTime(...)` | same | Time string formatting |
-| `FormatDelta(...)` | same | Delta string formatting (with +/− sign) |
-
-### Adding a new mode
-
-1. Add a value to `SplitDetailMode` enum in `SplitDetailComponent.cs`.
-2. Add a `CalcXxx(...)` method following the existing pattern.
-3. Add a `case` in `CalculateDisplayValues`.
-4. Add the display string to `_modeCombo.Items` in `SplitDetailSettings.cs`.
-
-### Changing column widths
-
-Edit the constants near the top of `SplitDetailComponent.cs`:
-
-```csharp
-private const float LabelColumnWidth = 90f;   // "Current Split" label
-private const float TimerColumnWidth = 80f;   // right-side time
+```text
+bin\Release\LiveSplit.SplitDetail.dll
 ```
 
-The middle area gets whatever is left over.
+into your LiveSplit `Components` folder.
+
+3. Restart LiveSplit.
+4. Open **Layout Editor**.
+5. Click `+ → Information → SplitDetail`.
 
 ---
 
-## Known Limitations & Verification Checklist
+## Building from source
 
-If something doesn't compile or behaves oddly, check these first:
+### Requirements
 
-- **`ILayoutSettings` color names** — `AheadGainingColor` and `BehindLosingColor`
-  are correct for recent LiveSplit builds. Older builds may use `AheadColor` /
-  `BehindColor`.  Search your `LiveSplit.Core.dll` decompiled source.
+- Visual Studio 2022 recommended.
+- .NET Framework 4.8.1 Developer Pack.
+- LiveSplit installed, or the required LiveSplit DLL references available in the project’s `packages` folder.
 
-- **`layout.Font`** — if your build uses `TextFont` or `TimesFont` instead,
-  change it in `DrawRow()`.
+### Steps
 
-- **Subsplit prefix** — open one of your splits in the Splits Editor; if the
-  child segment names start with something other than `-`, update `SubsplitPrefix`.
+1. Open `SplitDetail.csproj` in Visual Studio.
+2. Make sure the references resolve:
+   - `LiveSplit.Core.dll`
+   - `UpdateManager.dll`
+3. Build in **Release** mode.
+4. Copy `LiveSplit.SplitDetail.dll` to LiveSplit’s `Components` folder.
 
-- **`state.CurrentTime[method]`** — this is the standard live-timer value
-  used by all official LiveSplit components.  If it's null during a run, check
-  whether your timing method (Game Time) has an active connection.
+If references do not resolve automatically, add them manually through:
 
-- **`[assembly: ComponentFactory(...)]`** — LiveSplit's plugin loader looks for
-  this attribute to discover the factory type.  If the component doesn't appear
-  in the list, verify the attribute is present in `SplitDetailFactory.cs` and
-  that the DLL is in the `Components\` folder (not a sub-folder).
+```text
+References → Add Reference → Browse
+```
+
+and select the DLLs from your LiveSplit installation or local `packages` folder.
+
+---
+
+## Development notes
+
+Important areas in `SplitDetailComponent.cs`:
+
+| Function | Purpose |
+|---|---|
+| `GetGroupRange(...)` | Detects parent split groups from subsplit names. |
+| `GetCurrentGroupRange(...)` | Finds the active parent split group. |
+| `GetPriorGroupRange(...)` | Finds the last completed parent split group. |
+| `GetPriorSubsplitIndex(...)` | Finds the last completed individual segment. |
+| `GetCompletedRangeTime(...)` | Gets actual time for a completed range. |
+| `GetActiveRangeTime(...)` | Gets live elapsed time for an active range. |
+| `GetComparisonRangeTime(...)` | Gets comparison time for any range. |
+| `CalcCurrentSplit(...)` | Display logic for Current Split mode. |
+| `CalcPriorRange(...)` | Display logic for Prev/Live Split and Prev/Live Seg. |
+| `DrawRow(...)` | Main row layout and drawing entry point. |
+| `DrawTextWithEffects(...)` | LiveSplit-style shadows/outlines without clipping. |
+| `DrawTextWithEffectsClipped(...)` | Draws text with effects while preventing column overlap. |
+| `ShortenDeltaToFit(...)` | Compact delta text shortening for tight layouts. |
+
+The text drawing helpers are intentionally custom. Plain `Graphics.DrawString` can clip LiveSplit-style shadows/outlines on letters like `p`, `g`, and `y`.
+
+---
+
+## Recommended testing checklist
+
+Before publishing a new build, test:
+
+- Current Split mode.
+- Prev Split mode.
+- Prev Seg. mode.
+- Live Split switching when losing time.
+- Live Seg. switching when losing time.
+- One-comparison mode.
+- Two-comparison mode.
+- Priority Delta = Comparison 1.
+- Priority Delta = Comparison 2.
+- Separators empty, `|`, `/`, and `·`.
+- Accuracy: seconds, tenths, hundredths, milliseconds.
+- Runs with no subsplits.
+- Runs with multiple subsplits per parent group.
+- Game Time and Real Time, if applicable.
+- Missing comparison values / skipped splits.
+
+---
+
+## License
+
+MIT License.
