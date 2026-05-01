@@ -20,8 +20,8 @@
 //
 // ── Rendering approach ────────────────────────────────────────────────────────
 //   All text goes through DrawTextWithEffects / DrawTextWithEffectsClipped.
-//   These mirror TotalTimeloss's GraphicsPath approach to respect LiveSplit
-//   shadow/outline settings without clipping descenders (p, g, y, |, etc.).
+//   These use GraphicsPath rendering to respect LiveSplit shadow/outline
+//   settings without clipping descenders (p, g, y, |, etc.).
 //   Do NOT replace these calls with plain g.DrawString.
 // ============================================================================
 
@@ -48,16 +48,6 @@ namespace LiveSplit.UI.Components
         PriorSubsplit
     }
 
-    /// <summary>
-    /// Tracks whether the current split/segment is actively losing time.
-    /// Used to decide whether to switch from Prev to Live display.
-    /// </summary>
-    internal enum LiveDisplayMode
-    {
-        Prior,   // Show the previously completed item
-        Live     // Show the currently active item (losing time)
-    }
-
     internal struct SegmentRange
     {
         public readonly int Start;
@@ -77,6 +67,7 @@ namespace LiveSplit.UI.Components
         private const float MinLabelColumnWidth = 20f;
         private const float OuterPad            = 5f;
         private const float RightColumnWidth    = 78f;
+        private const float MinMiddleColumnWidth= 28f;
         private const float SmallFontScale      = 0.50f;
         private const float MinSmallFontPt      = 5f;
 
@@ -102,9 +93,6 @@ namespace LiveSplit.UI.Components
         private string _pr_delta2      = string.Empty;
         private Color  _pr_delta2Color = Color.White;
 
-        // Live mode tracking for Prior Split / Prior Seg. modes
-        private LiveDisplayMode _currentDisplayMode = LiveDisplayMode.Prior;
-
         // ── Constructor ───────────────────────────────────────────────────────
         public SplitDetailComponent(LiveSplitState state)
         {
@@ -114,33 +102,17 @@ namespace LiveSplit.UI.Components
         // ── IComponent identity ───────────────────────────────────────────────
         // ComponentName is shown in the Layout Editor component list.
         // We include the active mode label so multiple instances are easy to tell apart:
-        //   "SplitDetail - Current Split"
-        //   "SplitDetail - Current Seg."
-        //   "SplitDetail - Prev Split"
-        //   "SplitDetail - Prev Seg."
+        //   "Split Detail - Current Split"
+        //   "Split Detail - Current Seg."
+        //   "Split Detail - Prev Split"
+        //   "Split Detail - Prev Seg."
         // (or whatever custom labels the user has chosen in Settings)
         // NOTE: ComponentName reflects the configured mode, not temporary live state.
         public string ComponentName
         {
             get
             {
-                string label;
-                switch (_settings.Mode)
-                {
-                    case SplitDetailMode.CurrentSegment:
-                        label = _settings.LabelCurrentSeg;
-                        break;
-                    case SplitDetailMode.PriorSplit:
-                        label = _settings.LabelPrevSplit;
-                        break;
-                    case SplitDetailMode.PriorSubsplit:
-                        label = _settings.LabelPrevSeg;
-                        break;
-                    default:
-                        label = _settings.LabelCurrentSplit;
-                        break;
-                }
-                return "SplitDetail - " + label;
+                return "Split Detail - " + _settings.ComponentLabel;
             }
         }
 
@@ -256,6 +228,66 @@ namespace LiveSplit.UI.Components
             return prev >= 0 ? prev : -1;
         }
 
+        private void ApplyItemNameLabel(IRun run, int segmentIndex)
+        {
+            if (!_settings.UseItemName) return;
+            if (run == null || segmentIndex < 0 || segmentIndex >= run.Count) return;
+            _labelText = FormatItemNameForDisplay(run[segmentIndex].Name);
+        }
+
+        private string FormatItemNameForDisplay(string name)
+        {
+            if (string.IsNullOrEmpty(name)) return string.Empty;
+
+            if (_settings.Mode == SplitDetailMode.CurrentSegment ||
+                _settings.Mode == SplitDetailMode.PriorSubsplit)
+            {
+                return ExtractSegmentName(name);
+            }
+
+            return ExtractBraceName(name);
+        }
+
+        private static string ExtractSegmentName(string name)
+        {
+            if (string.IsNullOrEmpty(name)) return string.Empty;
+
+            string segmentName = RemoveLeadingBracePrefix(name);
+            segmentName = RemoveLeadingSubsplitPrefix(segmentName);
+
+            return string.IsNullOrEmpty(segmentName) ? ExtractBraceName(name) : segmentName;
+        }
+
+        private static string RemoveLeadingBracePrefix(string name)
+        {
+            if (string.IsNullOrEmpty(name)) return string.Empty;
+            if (name[0] != '{') return name;
+
+            int close = name.IndexOf('}');
+            if (close <= 0 || close >= name.Length - 1) return name;
+
+            return name.Substring(close + 1).TrimStart();
+        }
+
+        private static string RemoveLeadingSubsplitPrefix(string name)
+        {
+            if (string.IsNullOrEmpty(name)) return string.Empty;
+            if (name[0] == '-')
+                return name.Substring(1).TrimStart();
+            return name;
+        }
+
+        private static string ExtractBraceName(string name)
+        {
+            if (string.IsNullOrEmpty(name)) return string.Empty;
+            if (name[0] != '{') return name;
+
+            int close = name.IndexOf('}');
+            if (close <= 1) return name;
+
+            return name.Substring(1, close - 1);
+        }
+
         // =====================================================================
         // TIMING CALCULATIONS  — do not modify unless changing timing logic
         // =====================================================================
@@ -345,8 +377,8 @@ namespace LiveSplit.UI.Components
 
         /// <summary>
         /// Returns the gold/best-segment color from layout settings.
-        /// Tries several property names via reflection for version compatibility.
-        /// ⚠ VERIFY: "GoldColor" may be named differently in some LiveSplit forks.
+        /// Tries several property names via reflection for version compatibility,
+        /// then falls back to a standard gold color.
         /// </summary>
         private static Color GetGoldColor(LiveSplitState state)
         {
@@ -494,8 +526,7 @@ namespace LiveSplit.UI.Components
                                        TimingMethod method, string cmp1, string cmp2,
                                        bool isCurrentSubsplit)
         {
-            _labelText    = isCurrentSubsplit ? _settings.LabelCurrentSeg
-                                               : _settings.LabelCurrentSplit;
+            _labelText    = _settings.LabelForDisplay(live: false);
             _cs_cmp1Label = AbbreviateComparison(cmp1);
             _cs_cmp2Label = AbbreviateComparison(cmp2);
 
@@ -515,6 +546,7 @@ namespace LiveSplit.UI.Components
                 rangeStart = idx;
                 rangeEnd = idx;
                 elapsed = GetActiveSegmentTime(run, state, idx, method);
+                ApplyItemNameLabel(run, idx);
             }
             else
             {
@@ -524,6 +556,7 @@ namespace LiveSplit.UI.Components
                 rangeStart = group.Start;
                 rangeEnd = group.End;
                 elapsed = GetActiveRangeTime(run, state, group.Start, group.End, method);
+                ApplyItemNameLabel(run, group.End);
             }
 
             TimeSpan? t1 = GetComparisonRangeTime(run, rangeStart, rangeEnd, cmp1, method);
@@ -536,12 +569,12 @@ namespace LiveSplit.UI.Components
             // Live timer is never gold (run is still in progress)
         }
 
-        // ── Mode 2 & 3: Prev Split / Prev Seg. ───────────────────────────────
+        // ── Previous / Live Split and Segment modes ──────────────────────────
         //
         //  Left         │ Middle                │ Right
         //  ─────────────│───────────────────────│────────
-        //  Prev Split   │ -1:24  -1:14          │ 22.64     (or Live Split label + live deltas)
-        //  Prev Seg.    │ +4:28  +4:30          │ 4:43.00   (or Live Seg. label + live deltas)
+        //  Prev Split   │ -1:24  -1:14          │ 22.64     (or live split data)
+        //  Prev Seg.    │ +4:28  +4:30          │ 4:43.00   (or live segment data)
         //
         private void CalcPriorRange(LiveSplitState state, IRun run,
                                      TimingMethod method, string cmp1, string cmp2,
@@ -554,23 +587,18 @@ namespace LiveSplit.UI.Components
             else
                 isLosingTime = IsCurrentSplitLosingTime(state, run, method, cmp1, cmp2);
 
-            _currentDisplayMode = isLosingTime ? LiveDisplayMode.Live : LiveDisplayMode.Prior;
-
-            // Select the label based on mode and display state
-            if (isPriorSubsplit)
-            {
-                _labelText = isLosingTime ? _settings.LabelLiveSeg : _settings.LabelPrevSeg;
-            }
-            else
-            {
-                _labelText = isLosingTime ? _settings.LabelLiveSplit : _settings.LabelPrevSplit;
-            }
+            // If item-name labels are enabled, live overrides should show the
+            // active split/segment name directly, never the generated Live label.
+            _labelText = (_settings.UseItemName && isLosingTime)
+                ? string.Empty
+                : _settings.LabelForDisplay(isLosingTime);
 
             if (state.CurrentPhase == TimerPhase.NotRunning)
                 return;
 
             TimeSpan? actual = null, cmp1Time = null, cmp2Time = null;
             int rangeStart = 0, rangeEnd = 0;
+            bool hasRange = false;
 
             if (isLosingTime)
             {
@@ -581,6 +609,7 @@ namespace LiveSplit.UI.Components
                     if (idx >= 0 && idx < run.Count)
                     {
                         rangeStart = rangeEnd = idx;
+                        hasRange = true;
                         actual = GetActiveSegmentTime(run, state, idx, method);
                         cmp1Time = GetComparisonRangeTime(run, idx, idx, cmp1, method);
                         cmp2Time = GetComparisonRangeTime(run, idx, idx, cmp2, method);
@@ -593,6 +622,7 @@ namespace LiveSplit.UI.Components
                     {
                         rangeStart = group.Start;
                         rangeEnd = group.End;
+                        hasRange = true;
                         actual = GetActiveRangeTime(run, state, group.Start, group.End, method);
                         cmp1Time = GetComparisonRangeTime(run, group.Start, group.End, cmp1, method);
                         cmp2Time = GetComparisonRangeTime(run, group.Start, group.End, cmp2, method);
@@ -608,6 +638,7 @@ namespace LiveSplit.UI.Components
                     if (idx >= 0)
                     {
                         rangeStart = rangeEnd = idx;
+                        hasRange = true;
                         actual = GetCompletedRangeTime(run, idx, idx, method);
                         cmp1Time = GetComparisonRangeTime(run, idx, idx, cmp1, method);
                         cmp2Time = GetComparisonRangeTime(run, idx, idx, cmp2, method);
@@ -620,12 +651,16 @@ namespace LiveSplit.UI.Components
                     {
                         rangeStart = group.Start;
                         rangeEnd = group.End;
+                        hasRange = true;
                         actual = GetCompletedRangeTime(run, group.Start, group.End, method);
                         cmp1Time = GetComparisonRangeTime(run, group.Start, group.End, cmp1, method);
                         cmp2Time = GetComparisonRangeTime(run, group.Start, group.End, cmp2, method);
                     }
                 }
             }
+
+            if (hasRange)
+                ApplyItemNameLabel(run, rangeEnd);
 
             // Right side: actual time — always TimeColor, never gold.
             _rightText      = FormatTime(actual, _settings.Accuracy);
@@ -652,8 +687,8 @@ namespace LiveSplit.UI.Components
             }
             else
             {
-                _pr_delta1Color = DeltaColor(state, delta1);
-                _pr_delta2Color = DeltaColor(state, delta2);
+                _pr_delta1Color = DeltaColor(state, delta1, 1);
+                _pr_delta2Color = DeltaColor(state, delta2, 2);
             }
 
             // If only one comparison, suppress delta2
@@ -684,45 +719,22 @@ namespace LiveSplit.UI.Components
 
             float colGap = Math.Max(0f, _settings.ColumnSpacing);
 
-            // ── Label column width — dynamic, measuring all possible labels ──
-            // For Prior modes, measure both Prev and Live labels to reserve enough space.
-            // This prevents deltas from being pushed behind the label when switching
-            // between Prev and Live display modes.
-            string labelMeasureText;
-            if (_settings.Mode == SplitDetailMode.CurrentSplit ||
-                _settings.Mode == SplitDetailMode.CurrentSegment)
-            {
-                labelMeasureText = _labelText;
-            }
-            else if (_settings.Mode == SplitDetailMode.PriorSplit)
-            {
-                // Prev Split or Live Split — measure both to find max width
-                string prevLabel = "Prev " + _settings.LabelSplit;
-                string liveLabel = "Live " + _settings.LabelSplit;
-                labelMeasureText = prevLabel.Length >= liveLabel.Length ? prevLabel : liveLabel;
-            }
-            else  // PriorSubsplit
-            {
-                // Prev Seg. or Live Seg. — measure both to find max width
-                string prevLabel = "Prev " + _settings.LabelSegment;
-                string liveLabel = "Live " + _settings.LabelSegment;
-                labelMeasureText = prevLabel.Length >= liveLabel.Length ? prevLabel : liveLabel;
-            }
-
-            SizeF labelSz  = g.MeasureString(labelMeasureText, mainFont);
-            // Minimal safety gap (0.5px) after label text to prevent overlap with deltas.
-            // Column spacing setting controls the actual gap to the deltas.
-            float labelColW = Math.Max(MinLabelColumnWidth, labelSz.Width + 0.5f);
-
-            // ── Column geometry ───────────────────────────────────────────────
-            float xLeft  = OuterPad;
-            float xMid   = xLeft + labelColW + colGap;
-
             float rightColW = Math.Min(
                 RightColumnWidth,
                 Math.Max(22f, g.MeasureString(_rightText, mainFont).Width + 1f));
 
+            // ── Column geometry ───────────────────────────────────────────────
+            float xLeft  = OuterPad;
             float xRight = width - OuterPad - rightColW;
+
+            string labelMeasureText = _settings.MeasureLabelText(_labelText);
+            SizeF labelSz = g.MeasureString(labelMeasureText, mainFont);
+            float naturalLabelW = Math.Max(MinLabelColumnWidth, labelSz.Width + 0.5f);
+            float maxLabelW = Math.Max(0f, xRight - xLeft - colGap - MinMiddleColumnWidth);
+            float labelColW = Math.Min(naturalLabelW, maxLabelW);
+            string labelDrawText = ShortenLabelToFit(g, _labelText, mainFont, labelColW);
+
+            float xMid   = xLeft + labelColW + colGap;
             float midW   = Math.Max(0f, xRight - xMid);
 
             float fontH = g.MeasureString("Ay", mainFont).Height;
@@ -742,9 +754,10 @@ namespace LiveSplit.UI.Components
             };
 
             // ── Left: mode label ──────────────────────────────────────────────
-            DrawTextWithEffects(g, _labelText, mainFont, textColor,
-                                new RectangleF(xLeft, textY, labelColW, fontH),
-                                fmtLeft, ls);
+            if (!string.IsNullOrEmpty(labelDrawText) && labelColW > 0f)
+                DrawTextWithEffectsClipped(g, labelDrawText, mainFont, textColor,
+                                           new RectangleF(xLeft, textY, labelColW, fontH),
+                                           fmtLeft, ls);
 
             // ── Right: time / timer ───────────────────────────────────────────
             DrawTextWithEffects(g, _rightText, mainFont, _rightTextColor,
@@ -805,19 +818,22 @@ namespace LiveSplit.UI.Components
                 if (labelSubW + timeSubW > midW)
                     timeSubW = Math.Max(0f, midW - labelSubW);
 
+                Color cmp1Color = ComparisonColor(1, timeColor);
+                Color cmp2Color = ComparisonColor(2, timeColor);
+
                 // Line 1: cmp1 label + cmp1 time
-                DrawTextWithEffects(g, lbl1, smallFont, timeColor,
+                DrawTextWithEffects(g, lbl1, smallFont, cmp1Color,
                                     new RectangleF(xMid, y1, labelSubW, lineH), fmtLeft, ls);
-                DrawTextWithEffectsFit(g, _cs_cmp1Time, smallFont, timeColor,
+                DrawTextWithEffectsFit(g, _cs_cmp1Time, smallFont, cmp1Color,
                                        new RectangleF(xMid + labelSubW, y1, timeSubW, lineH),
                                        fmtRight, ls, MinSmallFontPt);
 
                 // Line 2: cmp2 label + cmp2 time (only if two comparisons)
                 if (twoLines)
                 {
-                    DrawTextWithEffects(g, lbl2, smallFont, timeColor,
+                    DrawTextWithEffects(g, lbl2, smallFont, cmp2Color,
                                         new RectangleF(xMid, y2, labelSubW, lineH), fmtLeft, ls);
-                    DrawTextWithEffectsFit(g, _cs_cmp2Time, smallFont, timeColor,
+                    DrawTextWithEffectsFit(g, _cs_cmp2Time, smallFont, cmp2Color,
                                            new RectangleF(xMid + labelSubW, y2, timeSubW, lineH),
                                            fmtRight, ls, MinSmallFontPt);
                 }
@@ -1235,6 +1251,32 @@ namespace LiveSplit.UI.Components
             return text;
         }
 
+        private static string ShortenLabelToFit(Graphics g, string text, Font font,
+                                                float maxWidth)
+        {
+            if (string.IsNullOrEmpty(text)) return string.Empty;
+            if (maxWidth <= 1f) return string.Empty;
+            if (g.MeasureString(text, font).Width <= maxWidth) return text;
+
+            return EllipsizeEndToFit(g, text, font, maxWidth);
+        }
+
+        private static string EllipsizeEndToFit(Graphics g, string text, Font font, float maxWidth)
+        {
+            const string Ellipsis = "...";
+            if (g.MeasureString(Ellipsis, font).Width > maxWidth)
+                return string.Empty;
+
+            for (int len = text.Length - 1; len >= 1; len--)
+            {
+                string candidate = text.Substring(0, len) + Ellipsis;
+                if (g.MeasureString(candidate, font).Width <= maxWidth)
+                    return candidate;
+            }
+
+            return Ellipsis;
+        }
+
         /// <summary>
         /// Shortens a delta string to fit within maxWidth pixels.
         ///
@@ -1386,11 +1428,21 @@ namespace LiveSplit.UI.Components
             catch { }
         }
 
-        private Color DeltaColor(LiveSplitState state, TimeSpan? delta)
+        private Color DeltaColor(LiveSplitState state, TimeSpan? delta, int comparisonIndex)
         {
-            if (delta == null)         return _settings.TextColor;
-            if (delta.Value.Ticks > 0) return state.LayoutSettings.BehindLosingTimeColor;
-            return state.LayoutSettings.AheadGainingTimeColor;
+            if (delta == null) return _settings.TextColor;
+
+            Color fallback = delta.Value.Ticks > 0
+                ? state.LayoutSettings.BehindLosingTimeColor
+                : state.LayoutSettings.AheadGainingTimeColor;
+            return ComparisonColor(comparisonIndex, fallback);
+        }
+
+        private Color ComparisonColor(int comparisonIndex, Color fallback)
+        {
+            if (comparisonIndex == 1 && _settings.OverrideComparison1Color) return _settings.Comparison1Color;
+            if (comparisonIndex == 2 && _settings.OverrideComparison2Color) return _settings.Comparison2Color;
+            return fallback;
         }
 
         private static string AbbreviateComparison(string comparison)

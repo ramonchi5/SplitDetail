@@ -2,7 +2,7 @@
 <!--
   SplitDetail LiveSplit Component — .csproj
   ==========================================
-  Target framework: .NET 4.8.1  (matches LiveSplit as of 1.8.29+)
+  Target framework: .NET Framework 4.8
   Language:         C# 7.3
 
   REFERENCE SETUP

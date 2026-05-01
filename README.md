@@ -19,10 +19,12 @@ SplitDetail can be added multiple times to a layout. Each instance can use a dif
 
 When a prior-mode component detects that the **current active** split or segment is losing time, it can temporarily switch to a live display:
 
-| Normal label | Live label | Meaning |
+| Normal display | Live display | Meaning |
 |---|---|---|
 | `Prev Split` | `Live Split` | Shows live deltas for the current active split group. |
 | `Prev Seg.` | `Live Seg.` | Shows live deltas for the current active segment/subsplit. |
+
+If `Use split/seg. name` is enabled, the live display uses the active split or segment name instead of `Live Split` / `Live Seg.`.
 
 After the runner splits, the component returns to the normal previous-completed display.
 
@@ -47,17 +49,18 @@ You can also use only one instance, for example as a more configurable replaceme
 
 - Subsplit-aware parent split group detection.
 - `Current Split`, `Current Seg.`, `Prev Split`, and `Prev Seg.` modes.
-- Temporary `Live Split` / `Live Seg.` display when the active split or segment is losing time.
+- Temporary live display when the active split or segment is losing time.
 - One-comparison or two-comparison display.
 - Fully selectable comparisons, including custom LiveSplit comparisons.
 - Priority delta setting for tight layouts.
 - Optional separator between deltas.
 - Configurable internal column spacing.
 - Configurable accuracy: seconds, tenths, hundredths, milliseconds.
+- Automatic cleanup for Subsplits names when using split/segment names.
 - Compact shortening behavior for large deltas.
 - Gold delta coloring for new bests.
 - LiveSplit-style text shadows and outlines.
-- Dynamic Layout Editor names, such as `SplitDetail - Current Split` and `SplitDetail - Current Seg.`.
+- Dynamic Layout Editor names, such as `Split Detail - Current Split` and `Split Detail - Current Seg.`.
 - Appears under `Information` in the Layout Editor component picker.
 
 ---
@@ -69,21 +72,10 @@ You can also use only one instance, for example as a more configurable replaceme
 | Setting | Default | Description |
 |---|---:|---|
 | **Mode** | `Current Split` | Chooses what this instance displays. |
-| **Label - Current** | `Current Split` | Label used for Current Split mode. |
-| **Label - Split** | `Split` | Suffix used to build `Prev Split` and `Live Split`. |
-| **Label - Segment** | `Seg.` | Suffix used to build `Current Seg.`, `Prev Seg.`, and `Live Seg.`. |
+| **Label** | mode default | Label used by the selected mode. Previous modes switch the prefix to `Live` while showing live data unless split/segment names are enabled. |
+| **Use split/seg. name** | off | Use the active or previous split/segment name instead of the custom label. Segment names drop leading `{Group}` tags and `-`; split names like `{Tutorial}5/5 Genji` display as `Tutorial`. |
 
-SplitDetail automatically builds the segment and previous/live labels:
-
-```text
-Current + Segment suffix → Current Seg.
-Prev + Split suffix  → Prev Split
-Live + Split suffix  → Live Split
-Prev + Segment suffix → Prev Seg.
-Live + Segment suffix → Live Seg.
-```
-
-If you prefer wider labels, change the suffixes. For example, `Segment` gives `Current Segment`, `Prev Segment`, and `Live Segment`.
+The mode menu uses full names, such as `Previous Segment`, while the default row labels stay compact, such as `Prev Seg.`.
 
 ### Comparisons
 
@@ -101,7 +93,7 @@ Comparison choices are read from the active run, so custom comparisons can be us
 | Setting | Default | Description |
 |---|---:|---|
 | **Separator** | empty | Optional separator between deltas. Empty means no separator. |
-| **Column spacing (px)** | `3` | Internal horizontal spacing between labels, deltas, separator, and time. This does not change outer padding or vertical height. |
+| **Column spacing (px)** | `3` | Gap between the label column and delta block. This does not change outer padding, vertical height, or internal delta/separator spacing. |
 
 Examples:
 
@@ -135,9 +127,11 @@ It avoids unreadable forms such as `+3:` or a lone `+`.
 | Setting | Description |
 |---|---|
 | **Text Color** | Label color. |
-| **Time Color** | Right-side time and Current mode comparison value color. |
+| **Time Color** | Right-side time and Current mode comparison value color when no comparison-specific color is enabled. |
+| **Comparison 1** | Optional custom color for the first Current mode comparison line and first prior/live delta. |
+| **Comparison 2** | Optional custom color for the second Current mode comparison line and second prior/live delta. |
 
-Delta colors follow LiveSplit’s ahead/behind colors. Gold deltas use the layout’s gold/best-segment color where available.
+Delta colors follow LiveSplit’s ahead/behind colors unless a comparison-specific color is enabled. Gold deltas still use the layout’s gold/best-segment color where available.
 
 ---
 
@@ -184,7 +178,7 @@ into the same LiveSplit `Components` folder. This is an unofficial modified buil
 
 4. Restart LiveSplit.
 5. Open **Layout Editor**.
-6. Add `SplitDetail` from `Information`.
+6. Add `Split Detail` from `Information`.
 7. If using the companion timer, add `Alternative Detailed Timer` from `Timer`.
 
 ---
@@ -194,7 +188,7 @@ into the same LiveSplit `Components` folder. This is an unofficial modified buil
 ### Requirements
 
 - Visual Studio 2022 recommended.
-- .NET Framework 4.8.1 Developer Pack.
+- .NET Framework 4.8 Developer Pack.
 - LiveSplit installed, or the required LiveSplit DLL references available in the project’s `packages` folder.
 
 ### Steps

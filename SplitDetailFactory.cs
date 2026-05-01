@@ -19,16 +19,14 @@ namespace LiveSplit.UI.Components
     public class SplitDetailFactory : IComponentFactory
     {
         // Display name shown in LiveSplit's "Add Component" dialog.
-        public string ComponentName => "SplitDetail";
+        public string ComponentName => "Split Detail";
 
         // Short description shown in the component list tooltip.
         public string Description =>
-            "Shows timing details for the current or prior split group, " +
-            "including subsplit grouping support.";
+            "Shows timing details for current or previous splits and segments, " +
+            "including subsplit support.";
 
         // Category determines which section of the component picker it appears in.
-        // ⚠ VERIFY: ComponentCategory values available in your LiveSplit version.
-        //   Common values: RunPrediction, Comparison, Timer, List, Other, Information.
         public ComponentCategory Category => ComponentCategory.Information;
 
         // Creates a new instance of the component for a given LiveSplit state.

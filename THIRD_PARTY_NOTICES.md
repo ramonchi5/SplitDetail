@@ -35,14 +35,14 @@ If `LiveSplit.Core.dll` is included in this repository or distributed with this 
 
 ## UpdateManager.dll
 
-This project may reference `UpdateManager.dll` during development/building.
+This project references `UpdateManager.dll` during development/building.
 
-Before publicly redistributing `UpdateManager.dll`, verify the exact source and license of the DLL included in this repository. If it is the GPL-licensed UpdateManager library, additional GPL obligations may apply.
+The copy in `packages/` was taken from LiveSplit 1.8.29 for compile-time reference only. It is not required in the SplitDetail release package because LiveSplit provides it at runtime.
 
-If the DLL is not required to build or distribute SplitDetail, prefer removing it from the public repository and referencing the copy included with LiveSplit or your local build environment instead.
+LiveSplit and its bundled assemblies are covered by the LiveSplit MIT License notice above.
 
 ## Microsoft .NET Framework Reference Assemblies
 
-This project may use Microsoft .NET Framework Reference Assemblies for building against .NET Framework 4.8.1.
+This project may use Microsoft .NET Framework Reference Assemblies for local builds.
 
-These should ideally be restored through NuGet/build tooling rather than manually redistributed in this repository.
+The checked-in NuGet package metadata lists Microsoft as the author and links its license at https://github.com/Microsoft/dotnet/blob/master/LICENSE. These assemblies are build-time references and are not part of the SplitDetail release package.

@@ -10,6 +10,9 @@
 // XML compatibility:
 //   Version 2 (old): stored "Comparison" (was Comparison2), TextColor, TimeColor
 //   Version 3 (new): stores Comparison1, Comparison2, plus all new fields
+//   Version 6: adds optional per-comparison delta colors
+//   Version 7: stores one active Label plus split/segment-name label options
+//   Version 8: item names auto-clean subsplit prefixes and brace labels
 //   SetSettings reads both old and new field names for backward compatibility.
 // ============================================================================
 
@@ -46,25 +49,10 @@ namespace LiveSplit.UI.Components
         // 2 = prioritize Comparison2 delta (default — usually the Best/highlight one).
         public int    PriorityDelta             { get; private set; } = 2;
 
-        // User-configurable mode labels.
-        // Current Split is independently editable.
-        // Current Seg. and Prev/Live modes use suffix/name-based generation:
-        //   Current Seg. = "Current " + LabelSegment
-        //   Prev Split = "Prev " + LabelSplit
-        //   Live Split = "Live " + LabelSplit
-        //   Prev Seg.  = "Prev " + LabelSegment
-        //   Live Seg.  = "Live " + LabelSegment
-        // This keeps layouts clean and avoids overlap issues.
-        public string LabelCurrentSplit         { get; private set; } = "Current Split";
-        public string LabelSplit                { get; private set; } = "Split";
-        public string LabelSegment              { get; private set; } = "Seg.";
-
-        // ── Generated labels (read-only, computed from suffixes) ──────────────
-        public string LabelCurrentSeg           => "Current " + LabelSegment;
-        public string LabelPrevSplit            => "Prev " + LabelSplit;
-        public string LabelLiveSplit            => "Live " + LabelSplit;
-        public string LabelPrevSeg              => "Prev " + LabelSegment;
-        public string LabelLiveSeg              => "Live " + LabelSegment;
+        // One active label per component instance. Prior modes derive the temporary
+        // Live label from this value so the settings panel only shows what matters.
+        public string Label                     { get; private set; } = "Current Split";
+        public bool   UseItemName               { get; private set; } = false;
 
         // Empty string = no separator (default, compact layout).
         // Non-empty    = drawn between the two deltas with fixed compact padding.
@@ -80,6 +68,10 @@ namespace LiveSplit.UI.Components
         // Colors.
         public Color  TextColor                 { get; private set; } = Color.White;
         public Color  TimeColor                 { get; private set; } = Color.White;
+        public bool   OverrideComparison1Color  { get; private set; } = false;
+        public Color  Comparison1Color          { get; private set; } = Color.White;
+        public bool   OverrideComparison2Color  { get; private set; } = false;
+        public Color  Comparison2Color          { get; private set; } = Color.White;
 
         // =====================================================================
         // Private controls
@@ -91,14 +83,17 @@ namespace LiveSplit.UI.Components
         private ComboBox      _cmp2Combo;
         private ComboBox      _cmpCountCombo;
         private ComboBox      _priorityCombo;
-        private TextBox       _labelCurrentBox;
-        private TextBox       _labelSplitBox;
-        private TextBox       _labelSegmentBox;
+        private TextBox       _labelBox;
+        private CheckBox      _useItemNameChk;
         private TextBox       _sepBox;
         private NumericUpDown _spacingNum;
         private RadioButton   _rdoHundredths, _rdoTenths, _rdoSeconds, _rdoMilliseconds;
         private Button        _textColorBtn;
         private Button        _timeColorBtn;
+        private CheckBox      _comparison1ColorChk;
+        private Button        _comparison1ColorBtn;
+        private CheckBox      _comparison2ColorChk;
+        private Button        _comparison2ColorBtn;
 
         // ── Constructor ───────────────────────────────────────────────────────
         public SplitDetailSettings(LiveSplitState state)
@@ -112,9 +107,14 @@ namespace LiveSplit.UI.Components
         // =====================================================================
         private void BuildUI()
         {
-            AutoSize   = true;
+            SuspendLayout();
+            Controls.Clear();
+
+            AutoScaleMode = AutoScaleMode.Font;
             AutoScroll = true;
-            Padding    = new Padding(10);
+            Dock = DockStyle.Fill;
+            Padding = new Padding(7);
+            Size = new Size(476, 520);
 
             // Outer flow: sections stack top-to-bottom
             var flow = new FlowLayoutPanel
@@ -123,6 +123,8 @@ namespace LiveSplit.UI.Components
                 FlowDirection = FlowDirection.TopDown,
                 WrapContents  = false,
                 Dock          = DockStyle.Fill,
+                Margin        = Padding.Empty,
+                Padding       = Padding.Empty,
             };
 
             flow.Controls.Add(MakeSection("Mode & Labels",    BuildModeLabelSection()));
@@ -132,19 +134,26 @@ namespace LiveSplit.UI.Components
             flow.Controls.Add(MakeSection("Colors",           BuildColorSection()));
 
             Controls.Add(flow);
+            ResumeLayout(false);
+            PerformLayout();
         }
 
         // ── Section builder ───────────────────────────────────────────────────
         private static GroupBox MakeSection(string title, Control content)
         {
+            int sectionWidth = 440;
+            int contentWidth = sectionWidth - 18;
+            Size preferred = content.GetPreferredSize(new Size(contentWidth, 0));
+            content.Location = new Point(8, 19);
+            content.Size = new Size(contentWidth, preferred.Height);
+
             var gb = new GroupBox
             {
                 Text     = title,
-                AutoSize = true,
                 Margin   = new Padding(0, 0, 0, 6),
                 Padding  = new Padding(6),
+                Size     = new Size(sectionWidth, Math.Max(48, preferred.Height + 30)),
             };
-            content.Dock = DockStyle.Fill;
             gb.Controls.Add(content);
             return gb;
         }
@@ -159,7 +168,7 @@ namespace LiveSplit.UI.Components
                 Padding     = Padding.Empty,
                 Margin      = Padding.Empty,
             };
-            t.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 120f));
+            t.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 112f));
             t.ColumnStyles.Add(new ColumnStyle(SizeType.Percent,  100f));
             return t;
         }
@@ -167,33 +176,35 @@ namespace LiveSplit.UI.Components
         // ── Mode & Labels ─────────────────────────────────────────────────────
         private Control BuildModeLabelSection()
         {
-            var t = MakeGrid(4);
+            var t = MakeGrid(3);
 
             // Mode
             t.Controls.Add(MakeLbl("Mode:"), 0, 0);
-            _modeCombo = MakeCombo("Current Split", "Current Seg.", "Prev Split", "Prev Seg.");
+            _modeCombo = MakeCombo("Current Split", "Current Segment", "Previous Split", "Previous Segment");
             _modeCombo.SelectedIndex = (int)Mode;
             _modeCombo.SelectedIndexChanged += (s, e) =>
+            {
                 Mode = (SplitDetailMode)_modeCombo.SelectedIndex;
+                Label = DefaultLabelForMode(Mode);
+                _labelBox.Text = Label;
+                UpdateModeLabelControls();
+            };
             t.Controls.Add(_modeCombo, 1, 0);
 
-            // Label: Current Split (independently editable)
-            t.Controls.Add(MakeLbl("Label – Current:"), 0, 1);
-            _labelCurrentBox = MakeTextBox(LabelCurrentSplit, 30);
-            _labelCurrentBox.TextChanged += (s, e) => LabelCurrentSplit = _labelCurrentBox.Text;
-            t.Controls.Add(_labelCurrentBox, 1, 1);
+            t.Controls.Add(MakeLbl("Label:"), 0, 1);
+            _labelBox = MakeTextBox(Label, 40);
+            _labelBox.TextChanged += (s, e) => Label = _labelBox.Text;
+            t.Controls.Add(_labelBox, 1, 1);
 
-            // Label: Split suffix (generates Prev Split / Live Split)
-            t.Controls.Add(MakeLbl("Label – Split:"), 0, 2);
-            _labelSplitBox = MakeTextBox(LabelSplit, 20);
-            _labelSplitBox.TextChanged += (s, e) => LabelSplit = _labelSplitBox.Text;
-            t.Controls.Add(_labelSplitBox, 1, 2);
+            _useItemNameChk = MakeCompactCheck(string.Empty, UseItemName);
+            _useItemNameChk.CheckedChanged += (s, e) =>
+            {
+                UseItemName = _useItemNameChk.Checked;
+                UpdateModeLabelControls();
+            };
+            t.Controls.Add(_useItemNameChk, 1, 2);
 
-            // Label: Segment suffix (generates Prev Seg. / Live Seg.)
-            t.Controls.Add(MakeLbl("Label – Segment:"), 0, 3);
-            _labelSegmentBox = MakeTextBox(LabelSegment, 20);
-            _labelSegmentBox.TextChanged += (s, e) => LabelSegment = _labelSegmentBox.Text;
-            t.Controls.Add(_labelSegmentBox, 1, 3);
+            UpdateModeLabelControls();
 
             return t;
         }
@@ -201,7 +212,7 @@ namespace LiveSplit.UI.Components
         // ── Comparisons ───────────────────────────────────────────────────────
         private Control BuildComparisonSection()
         {
-            var t = MakeGrid(5);
+            var t = MakeGrid(4);
 
             // Comparison 1
             t.Controls.Add(MakeLbl("Comparison 1:"), 0, 0);
@@ -239,24 +250,13 @@ namespace LiveSplit.UI.Components
                 PriorityDelta = _priorityCombo.SelectedIndex + 1;
             t.Controls.Add(_priorityCombo, 1, 3);
 
-            var note = new Label
-            {
-                Text      = "Priority delta keeps its full value when space is tight.\n" +
-                            "Comparison 1 = left delta / top line.\n" +
-                            "Comparison 2 = right delta / bottom line.",
-                AutoSize  = true,
-                ForeColor = SystemColors.GrayText,
-            };
-            t.SetColumnSpan(note, 2);
-            t.Controls.Add(note, 0, 4);
-
             return t;
         }
 
         // ── Layout ────────────────────────────────────────────────────────────
         private Control BuildLayoutSection()
         {
-            var t = MakeGrid(3);
+            var t = MakeGrid(2);
 
             // Separator
             t.Controls.Add(MakeLbl("Separator:"), 0, 0);
@@ -276,17 +276,6 @@ namespace LiveSplit.UI.Components
             };
             _spacingNum.ValueChanged += (s, e) => ColumnSpacing = (float)_spacingNum.Value;
             t.Controls.Add(_spacingNum, 1, 1);
-
-            var note = new Label
-            {
-                Text      = "Separator: empty = no separator, just a small gap.\n" +
-                            "Column spacing: gap between label and delta block.\n" +
-                            "Outer padding is not affected.",
-                AutoSize  = true,
-                ForeColor = SystemColors.GrayText,
-            };
-            t.SetColumnSpan(note, 2);
-            t.Controls.Add(note, 0, 2);
 
             return t;
         }
@@ -323,7 +312,20 @@ namespace LiveSplit.UI.Components
         // ── Colors ────────────────────────────────────────────────────────────
         private Control BuildColorSection()
         {
-            var t = MakeGrid(2);
+            var t = new TableLayoutPanel
+            {
+                AutoSize    = true,
+                ColumnCount = 4,
+                RowCount    = 2,
+                Padding     = Padding.Empty,
+                Margin      = Padding.Empty,
+            };
+            t.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 92f));
+            t.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 42f));
+            t.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 172f));
+            t.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 34f));
+            t.RowStyles.Add(new RowStyle(SizeType.Absolute, 27f));
+            t.RowStyles.Add(new RowStyle(SizeType.Absolute, 27f));
 
             // Text Color (label, separator)
             t.Controls.Add(MakeLbl("Text Color:"), 0, 0);
@@ -345,7 +347,132 @@ namespace LiveSplit.UI.Components
             };
             t.Controls.Add(_timeColorBtn, 1, 1);
 
+            _comparison1ColorChk = MakeCompactCheck("Comparison 1", OverrideComparison1Color);
+            _comparison1ColorChk.CheckedChanged += (s, e) =>
+            {
+                OverrideComparison1Color = _comparison1ColorChk.Checked;
+                UpdateComparisonColorControlStates();
+            };
+            t.Controls.Add(_comparison1ColorChk, 2, 0);
+
+            _comparison1ColorBtn = MakeColorBtn(Comparison1Color);
+            _comparison1ColorBtn.Click += (s, e) =>
+            {
+                SettingsHelper.ColorButtonClick(_comparison1ColorBtn, this);
+                Comparison1Color = _comparison1ColorBtn.BackColor;
+            };
+            t.Controls.Add(_comparison1ColorBtn, 3, 0);
+
+            _comparison2ColorChk = MakeCompactCheck("Comparison 2", OverrideComparison2Color);
+            _comparison2ColorChk.CheckedChanged += (s, e) =>
+            {
+                OverrideComparison2Color = _comparison2ColorChk.Checked;
+                UpdateComparisonColorControlStates();
+            };
+            t.Controls.Add(_comparison2ColorChk, 2, 1);
+
+            _comparison2ColorBtn = MakeColorBtn(Comparison2Color);
+            _comparison2ColorBtn.Click += (s, e) =>
+            {
+                SettingsHelper.ColorButtonClick(_comparison2ColorBtn, this);
+                Comparison2Color = _comparison2ColorBtn.BackColor;
+            };
+            t.Controls.Add(_comparison2ColorBtn, 3, 1);
+
+            UpdateComparisonColorControlStates();
             return t;
+        }
+
+        private void UpdateComparisonColorControlStates()
+        {
+            if (_comparison1ColorBtn != null) _comparison1ColorBtn.Enabled = OverrideComparison1Color;
+            if (_comparison2ColorBtn != null) _comparison2ColorBtn.Enabled = OverrideComparison2Color;
+        }
+
+        private void UpdateModeLabelControls()
+        {
+            bool segmentMode = IsSegmentMode(Mode);
+            if (_useItemNameChk != null)
+                _useItemNameChk.Text = segmentMode ? "Use seg. name" : "Use split name";
+
+            if (_labelBox != null)
+                _labelBox.Enabled = !UseItemName;
+
+        }
+
+        public string LabelForDisplay(bool live)
+        {
+            if (live && (Mode == SplitDetailMode.PriorSplit || Mode == SplitDetailMode.PriorSubsplit))
+                return ToLiveLabel(Label);
+            return Label;
+        }
+
+        public string MeasureLabelText(string currentLabel)
+        {
+            if (!UseItemName && (Mode == SplitDetailMode.PriorSplit || Mode == SplitDetailMode.PriorSubsplit))
+            {
+                string liveLabel = LabelForDisplay(live: true);
+                return liveLabel.Length > Label.Length ? liveLabel : Label;
+            }
+
+            return currentLabel;
+        }
+
+        public string ComponentLabel => Label;
+
+        private static bool IsSegmentMode(SplitDetailMode mode)
+        {
+            return mode == SplitDetailMode.CurrentSegment || mode == SplitDetailMode.PriorSubsplit;
+        }
+
+        private static string DefaultLabelForMode(SplitDetailMode mode)
+        {
+            switch (mode)
+            {
+                case SplitDetailMode.CurrentSegment: return "Current Seg.";
+                case SplitDetailMode.PriorSplit:     return "Prev Split";
+                case SplitDetailMode.PriorSubsplit:  return "Prev Seg.";
+                default:                             return "Current Split";
+            }
+        }
+
+        private static string ToLiveLabel(string label)
+        {
+            if (string.IsNullOrEmpty(label)) return "Live";
+            if (label.StartsWith("Prev ")) return "Live " + label.Substring(5);
+            if (label.StartsWith("Previous ")) return "Live " + label.Substring(9);
+            return "Live " + label;
+        }
+
+        private static string InferLegacyLabel(XmlNode node, SplitDetailMode mode)
+        {
+            switch (mode)
+            {
+                case SplitDetailMode.CurrentSplit:
+                    return R(node, "LabelCurrentSplit") ?? DefaultLabelForMode(mode);
+
+                case SplitDetailMode.CurrentSegment:
+                {
+                    string segment = R(node, "LabelSegment") ?? InferLegacySuffix(R(node, "LabelPrevSeg"), "Seg.");
+                    return "Current " + segment;
+                }
+
+                case SplitDetailMode.PriorSplit:
+                    return R(node, "LabelPrevSplit") ?? ("Prev " + (R(node, "LabelSplit") ?? "Split"));
+
+                case SplitDetailMode.PriorSubsplit:
+                    return R(node, "LabelPrevSeg") ?? ("Prev " + (R(node, "LabelSegment") ?? "Seg."));
+
+                default:
+                    return DefaultLabelForMode(mode);
+            }
+        }
+
+        private static string InferLegacySuffix(string oldLabel, string fallback)
+        {
+            if (!string.IsNullOrEmpty(oldLabel) && oldLabel.StartsWith("Prev "))
+                return oldLabel.Substring(5);
+            return fallback;
         }
 
         // ── UI helpers ────────────────────────────────────────────────────────
@@ -364,6 +491,18 @@ namespace LiveSplit.UI.Components
             return c;
         }
 
+        private static CheckBox MakeCompactCheck(string text, bool isChecked)
+        {
+            return new CheckBox
+            {
+                Text      = text,
+                Checked   = isChecked,
+                AutoSize  = true,
+                Anchor    = AnchorStyles.Left,
+                Margin    = new Padding(0, 4, 6, 0),
+            };
+        }
+
         private static TextBox MakeTextBox(string text, int maxLength)
             => new TextBox { Text = text, MaxLength = maxLength, Dock = DockStyle.Fill };
 
@@ -378,6 +517,8 @@ namespace LiveSplit.UI.Components
             UseVisualStyleBackColor = false,
             Width                = 23,
             Height               = 23,
+            Anchor               = AnchorStyles.Left,
+            Margin               = new Padding(0, 1, 8, 0),
         };
 
         // =====================================================================
@@ -415,20 +556,23 @@ namespace LiveSplit.UI.Components
         public XmlNode GetSettings(XmlDocument document)
         {
             XmlElement root = document.CreateElement("Settings");
-            W(document, root, "Version",           "5");
+            W(document, root, "Version",           "8");
             W(document, root, "Mode",              Mode.ToString());
             W(document, root, "Comparison1",       Comparison1);
             W(document, root, "Comparison2",       Comparison2);
             W(document, root, "ComparisonCount",   ComparisonCount.ToString());
             W(document, root, "PriorityDelta",     PriorityDelta.ToString());
-            W(document, root, "LabelCurrentSplit", LabelCurrentSplit);
-            W(document, root, "LabelSplit",        LabelSplit);
-            W(document, root, "LabelSegment",      LabelSegment);
+            W(document, root, "Label",             Label);
+            W(document, root, "UseItemName",       UseItemName.ToString());
             W(document, root, "Separator",         Separator);
             W(document, root, "ColumnSpacing",     ColumnSpacing.ToString(System.Globalization.CultureInfo.InvariantCulture));
             W(document, root, "Accuracy",          Accuracy.ToString());
             W(document, root, "TextColor",         ColorToHex(TextColor));
             W(document, root, "TimeColor",         ColorToHex(TimeColor));
+            W(document, root, "OverrideComparison1Color", OverrideComparison1Color.ToString());
+            W(document, root, "Comparison1Color",         ColorToHex(Comparison1Color));
+            W(document, root, "OverrideComparison2Color", OverrideComparison2Color.ToString());
+            W(document, root, "Comparison2Color",         ColorToHex(Comparison2Color));
             return root;
         }
 
@@ -476,46 +620,22 @@ namespace LiveSplit.UI.Components
                 _priorityCombo.SelectedIndex = pr - 1;
             }
 
-            // Labels
-            string lcs = R(node, "LabelCurrentSplit");
-            if (!string.IsNullOrEmpty(lcs)) { LabelCurrentSplit = lcs; _labelCurrentBox.Text = lcs; }
-
-            // Backward compatibility: if old LabelPrevSplit/LabelPrevSeg exist, try to infer the suffix
-            string labelSplit = R(node, "LabelSplit");
-            if (!string.IsNullOrEmpty(labelSplit))
+            // Label. Fall back to the older per-mode/suffix label fields.
+            string label = R(node, "Label") ?? InferLegacyLabel(node, Mode);
+            if (!string.IsNullOrEmpty(label))
             {
-                LabelSplit = labelSplit;
-                _labelSplitBox.Text = labelSplit;
-            }
-            else
-            {
-                // Try to infer from old LabelPrevSplit field (e.g., "Prev Split" → "Split")
-                string oldPrevSplit = R(node, "LabelPrevSplit");
-                if (!string.IsNullOrEmpty(oldPrevSplit) && oldPrevSplit.StartsWith("Prev "))
-                {
-                    string inferred = oldPrevSplit.Substring(5);  // remove "Prev "
-                    LabelSplit = inferred;
-                    _labelSplitBox.Text = inferred;
-                }
+                Label = label;
+                _labelBox.Text = label;
             }
 
-            string labelSegment = R(node, "LabelSegment");
-            if (!string.IsNullOrEmpty(labelSegment))
+            string useNameStr = R(node, "UseItemName");
+            if (bool.TryParse(useNameStr, out bool useItemName))
             {
-                LabelSegment = labelSegment;
-                _labelSegmentBox.Text = labelSegment;
+                UseItemName = useItemName;
+                _useItemNameChk.Checked = useItemName;
             }
-            else
-            {
-                // Try to infer from old LabelPrevSeg field (e.g., "Prev Seg." → "Seg.")
-                string oldPrevSeg = R(node, "LabelPrevSeg");
-                if (!string.IsNullOrEmpty(oldPrevSeg) && oldPrevSeg.StartsWith("Prev "))
-                {
-                    string inferred = oldPrevSeg.Substring(5);  // remove "Prev "
-                    LabelSegment = inferred;
-                    _labelSegmentBox.Text = inferred;
-                }
-            }
+
+            UpdateModeLabelControls();
 
             // Separator — allow empty string (no separator is valid)
             string sep = node["Separator"]?.InnerText;   // don't use R() which skips null
@@ -557,6 +677,36 @@ namespace LiveSplit.UI.Components
                 TimeColor = HexToColor(mc);
                 _timeColorBtn.BackColor = TimeColor;
             }
+
+            string oc1 = R(node, "OverrideComparison1Color") ?? R(node, "OverrideDelta1Color");
+            if (bool.TryParse(oc1, out bool overrideComparison1))
+            {
+                OverrideComparison1Color = overrideComparison1;
+                _comparison1ColorChk.Checked = overrideComparison1;
+            }
+
+            string cc1 = R(node, "Comparison1Color") ?? R(node, "Delta1Color");
+            if (!string.IsNullOrEmpty(cc1))
+            {
+                Comparison1Color = HexToColor(cc1);
+                _comparison1ColorBtn.BackColor = Comparison1Color;
+            }
+
+            string oc2 = R(node, "OverrideComparison2Color") ?? R(node, "OverrideDelta2Color");
+            if (bool.TryParse(oc2, out bool overrideComparison2))
+            {
+                OverrideComparison2Color = overrideComparison2;
+                _comparison2ColorChk.Checked = overrideComparison2;
+            }
+
+            string cc2 = R(node, "Comparison2Color") ?? R(node, "Delta2Color");
+            if (!string.IsNullOrEmpty(cc2))
+            {
+                Comparison2Color = HexToColor(cc2);
+                _comparison2ColorBtn.BackColor = Comparison2Color;
+            }
+
+            UpdateComparisonColorControlStates();
         }
 
         // ── XML helpers ───────────────────────────────────────────────────────
