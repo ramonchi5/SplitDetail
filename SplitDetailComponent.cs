@@ -57,6 +57,248 @@ namespace LiveSplit.UI.Components
         public static readonly SegmentRange Invalid = new SegmentRange(-1, -1);
     }
 
+    internal static class SplitDetailLayoutLinks
+    {
+        private const int MaxGroup = 4;
+        private const int ReportLifetimeMs = 1000;
+
+        private static readonly object Sync = new object();
+        private static readonly List<WeakReference> Settings = new List<WeakReference>();
+        private static readonly Dictionary<int, float> GroupSpacing = new Dictionary<int, float>();
+        private static readonly Dictionary<int, float> GroupValueTimeGap = new Dictionary<int, float>();
+        private static readonly Dictionary<int, float> GroupLabelRightOffset = new Dictionary<int, float>();
+        private static readonly Dictionary<int, float> GroupLabelValueGap = new Dictionary<int, float>();
+        private static readonly Dictionary<int, Dictionary<int, MiddleEndReport>> GroupReports =
+            new Dictionary<int, Dictionary<int, MiddleEndReport>>();
+        private static readonly Dictionary<int, Dictionary<int, MiddleEndReport>> GroupLabelLeftReports =
+            new Dictionary<int, Dictionary<int, MiddleEndReport>>();
+
+        private struct MiddleEndReport
+        {
+            public readonly float Value;
+            public readonly int Tick;
+
+            public MiddleEndReport(float value, int tick)
+            {
+                Value = value;
+                Tick = tick;
+            }
+        }
+
+        public static void Register(SplitDetailSettings settings)
+        {
+            if (settings == null)
+                return;
+
+            lock (Sync)
+            {
+                CleanupSettingsLocked();
+
+                for (int i = 0; i < Settings.Count; i++)
+                {
+                    if (ReferenceEquals(Settings[i].Target, settings))
+                        return;
+                }
+
+                Settings.Add(new WeakReference(settings));
+            }
+        }
+
+        public static float ResolveColumnSpacing(int group, float localSpacing)
+        {
+            group = ClampGroup(group);
+            if (group == 0)
+                return Math.Max(0f, localSpacing);
+
+            lock (Sync)
+            {
+                float spacing;
+                if (GroupSpacing.TryGetValue(group, out spacing))
+                    return Math.Max(0f, spacing);
+            }
+
+            return Math.Max(0f, localSpacing);
+        }
+
+        public static void PublishSpacing(SplitDetailSettings source, int group, float spacing)
+        {
+            PublishLinkedSetting(GroupSpacing, source, group, spacing,
+                                 (settings, value) => settings.ApplyLinkedColumnSpacing(value));
+        }
+
+        public static void PublishMiddleValueTimeGap(SplitDetailSettings source, int group, float gap)
+        {
+            PublishLinkedSetting(GroupValueTimeGap, source, group, gap,
+                                 (settings, value) => settings.ApplyLinkedMiddleValueTimeGap(value));
+        }
+
+        public static void PublishMiddleLabelRightOffset(SplitDetailSettings source, int group, float offset)
+        {
+            PublishLinkedSetting(GroupLabelRightOffset, source, group, offset,
+                                 (settings, value) => settings.ApplyLinkedMiddleLabelRightOffset(value));
+        }
+
+        public static void PublishMiddleLabelValueGap(SplitDetailSettings source, int group, float gap)
+        {
+            PublishLinkedSetting(GroupLabelValueGap, source, group, gap,
+                                 (settings, value) => settings.ApplyLinkedMiddleLabelValueGap(value));
+        }
+
+        public static void PublishBoldFonts(SplitDetailSettings source, int group,
+                                            bool left, bool middleLabel,
+                                            bool middleValue, bool right,
+                                            bool enableLinkedRecipients)
+        {
+            group = ClampGroup(group);
+            if (source == null || group == 0)
+                return;
+
+            List<SplitDetailSettings> linkedSettings = new List<SplitDetailSettings>();
+
+            lock (Sync)
+            {
+                CleanupSettingsLocked();
+
+                for (int i = 0; i < Settings.Count; i++)
+                {
+                    SplitDetailSettings settings = Settings[i].Target as SplitDetailSettings;
+                    if (settings == null ||
+                        ReferenceEquals(settings, source) ||
+                        settings.MiddleColumnLinkGroup != group ||
+                        (!enableLinkedRecipients && !settings.LinkBoldFonts))
+                    {
+                        continue;
+                    }
+
+                    linkedSettings.Add(settings);
+                }
+            }
+
+            for (int i = 0; i < linkedSettings.Count; i++)
+                linkedSettings[i].ApplyLinkedBoldFonts(
+                    left, middleLabel, middleValue, right, enableLinkedRecipients);
+        }
+
+        private static void PublishLinkedSetting(
+            Dictionary<int, float> values,
+            SplitDetailSettings source,
+            int group,
+            float value,
+            Action<SplitDetailSettings, float> apply)
+        {
+            group = ClampGroup(group);
+            if (source == null || group == 0 || apply == null)
+                return;
+
+            value = Math.Max(0f, value);
+            List<SplitDetailSettings> linkedSettings = new List<SplitDetailSettings>();
+
+            lock (Sync)
+            {
+                values[group] = value;
+                CleanupSettingsLocked();
+
+                for (int i = 0; i < Settings.Count; i++)
+                {
+                    SplitDetailSettings settings = Settings[i].Target as SplitDetailSettings;
+                    if (settings == null ||
+                        ReferenceEquals(settings, source) ||
+                        settings.MiddleColumnLinkGroup != group)
+                    {
+                        continue;
+                    }
+
+                    linkedSettings.Add(settings);
+                }
+            }
+
+            for (int i = 0; i < linkedSettings.Count; i++)
+                apply(linkedSettings[i], value);
+        }
+
+        public static float ResolveMiddleEnd(int group, int instanceId, float localMidEnd)
+        {
+            return ResolveLinkedMinimum(GroupReports, group, instanceId, localMidEnd);
+        }
+
+        public static float ResolveLabelLeft(int group, int instanceId, float localLabelLeft)
+        {
+            return ResolveLinkedMinimum(GroupLabelLeftReports, group, instanceId, localLabelLeft);
+        }
+
+        private static float ResolveLinkedMinimum(
+            Dictionary<int, Dictionary<int, MiddleEndReport>> reportGroups,
+            int group,
+            int instanceId,
+            float localValue)
+        {
+            group = ClampGroup(group);
+            if (group == 0 || instanceId <= 0)
+                return localValue;
+
+            lock (Sync)
+            {
+                Dictionary<int, MiddleEndReport> reports;
+                if (!reportGroups.TryGetValue(group, out reports))
+                {
+                    reports = new Dictionary<int, MiddleEndReport>();
+                    reportGroups[group] = reports;
+                }
+
+                int now = Environment.TickCount;
+                reports[instanceId] = new MiddleEndReport(localValue, now);
+
+                float linkedValue = localValue;
+                List<int> stale = null;
+
+                foreach (KeyValuePair<int, MiddleEndReport> report in reports)
+                {
+                    if (TickAge(now, report.Value.Tick) > ReportLifetimeMs)
+                    {
+                        if (stale == null)
+                            stale = new List<int>();
+                        stale.Add(report.Key);
+                        continue;
+                    }
+
+                    linkedValue = Math.Min(linkedValue, report.Value.Value);
+                }
+
+                if (stale != null)
+                {
+                    for (int i = 0; i < stale.Count; i++)
+                        reports.Remove(stale[i]);
+                }
+
+                return linkedValue;
+            }
+        }
+
+        private static int ClampGroup(int group)
+        {
+            if (group < 0) return 0;
+            if (group > MaxGroup) return MaxGroup;
+            return group;
+        }
+
+        private static int TickAge(int now, int then)
+        {
+            unchecked
+            {
+                return now - then;
+            }
+        }
+
+        private static void CleanupSettingsLocked()
+        {
+            for (int i = Settings.Count - 1; i >= 0; i--)
+            {
+                if (!Settings[i].IsAlive)
+                    Settings.RemoveAt(i);
+            }
+        }
+    }
+
     public class SplitDetailComponent : IComponent
     {
         // ── Subsplit prefix ───────────────────────────────────────────────────
@@ -68,11 +310,16 @@ namespace LiveSplit.UI.Components
         private const float OuterPad            = 5f;
         private const float RightColumnWidth    = 78f;
         private const float MinMiddleColumnWidth= 28f;
+        private const float LabelComparisonPad  = 1f;
+        private const float MiddleTextGap       = 3f;
+        private const float MiddleRightSafeGap  = 5f;
         private const float SmallFontScale      = 0.50f;
         private const float MinSmallFontPt      = 5f;
 
         // ── Settings ──────────────────────────────────────────────────────────
+        private static int _nextLayoutLinkId;
         private readonly SplitDetailSettings _settings;
+        private readonly int _layoutLinkId;
 
         // ── Cached display data ────────────────────────────────────────────────
 
@@ -92,11 +339,51 @@ namespace LiveSplit.UI.Components
         private Color  _pr_delta1Color = Color.White;
         private string _pr_delta2      = string.Empty;
         private Color  _pr_delta2Color = Color.White;
+        private Color  _backgroundDeltaColor = Color.Transparent;
+        private readonly LiveSplitState _state;
+        private int _highlightScrollOffset;
+
+        private struct MiddleLayout
+        {
+            public float ValueRight;
+            public float LabelX;
+            public float LabelW;
+            public float LeftBound;
+            public float LabelValueGap;
+
+            public MiddleLayout(float valueRight, float labelX, float labelW,
+                                float leftBound)
+                : this(valueRight, labelX, labelW, leftBound, MiddleTextGap)
+            {
+            }
+
+            public MiddleLayout(float valueRight, float labelX, float labelW,
+                                float leftBound, float labelValueGap)
+            {
+                ValueRight = valueRight;
+                LabelX = labelX;
+                LabelW = labelW;
+                LeftBound = leftBound;
+                LabelValueGap = Math.Max(0f, labelValueGap);
+            }
+        }
 
         // ── Constructor ───────────────────────────────────────────────────────
         public SplitDetailComponent(LiveSplitState state)
         {
+            _state = state;
+            _layoutLinkId = System.Threading.Interlocked.Increment(ref _nextLayoutLinkId);
             _settings = new SplitDetailSettings(state);
+            if (_state != null)
+            {
+                _state.OnStart += state_OnResetHighlightScroll;
+                _state.OnSplit += state_OnResetHighlightScroll;
+                _state.OnUndoSplit += state_OnResetHighlightScroll;
+                _state.OnSkipSplit += state_OnResetHighlightScroll;
+                _state.OnReset += state_OnResetHighlightScroll;
+                _state.OnScrollUp += state_OnScrollUp;
+                _state.OnScrollDown += state_OnScrollDown;
+            }
         }
 
         // ── IComponent identity ───────────────────────────────────────────────
@@ -157,7 +444,58 @@ namespace LiveSplit.UI.Components
                                  float width, Region clipRegion)
             => DrawRow(g, state, width, RowHeight);
 
-        public void Dispose() { }
+        public void Dispose()
+        {
+            if (_state != null)
+            {
+                _state.OnStart -= state_OnResetHighlightScroll;
+                _state.OnSplit -= state_OnResetHighlightScroll;
+                _state.OnUndoSplit -= state_OnResetHighlightScroll;
+                _state.OnSkipSplit -= state_OnResetHighlightScroll;
+                _state.OnReset -= state_OnResetHighlightScroll;
+                _state.OnScrollUp -= state_OnScrollUp;
+                _state.OnScrollDown -= state_OnScrollDown;
+            }
+        }
+
+        private void state_OnResetHighlightScroll(object sender, EventArgs e)
+        {
+            _highlightScrollOffset = 0;
+        }
+
+        private void state_OnResetHighlightScroll(object sender, TimerPhase e)
+        {
+            _highlightScrollOffset = 0;
+        }
+
+        private void state_OnScrollUp(object sender, EventArgs e)
+        {
+            if (_state == null) return;
+            _highlightScrollOffset--;
+            ClampHighlightScrollOffset();
+        }
+
+        private void state_OnScrollDown(object sender, EventArgs e)
+        {
+            if (_state == null) return;
+            _highlightScrollOffset++;
+            ClampHighlightScrollOffset();
+        }
+
+        private void ClampHighlightScrollOffset()
+        {
+            IRun run = _state?.Run;
+            if (run == null || run.Count == 0)
+            {
+                _highlightScrollOffset = 0;
+                return;
+            }
+
+            int baseIndex = GetBaseHighlightSplitIndex(_state);
+            _highlightScrollOffset = Math.Min(
+                Math.Max(_highlightScrollOffset, -baseIndex),
+                run.Count - baseIndex - 1);
+        }
 
         // =====================================================================
         // GROUP / SUBSPLIT DETECTION  — do not modify unless changing subsplit logic
@@ -203,15 +541,37 @@ namespace LiveSplit.UI.Components
             return GetGroupRange(state.Run, idx);
         }
 
+        private bool UsesHighlightedSplit(LiveSplitState state)
+        {
+            return state != null &&
+                   (state.CurrentPhase == TimerPhase.Ended ||
+                    _highlightScrollOffset != 0);
+        }
+
+        private int GetBaseHighlightSplitIndex(LiveSplitState state)
+        {
+            if (state?.Run == null || state.Run.Count == 0) return -1;
+            return Math.Min(Math.Max(state.CurrentSplitIndex, 0), state.Run.Count - 1);
+        }
+
+        private int GetHighlightedSplitIndex(LiveSplitState state)
+        {
+            if (state?.Run == null || state.Run.Count == 0) return -1;
+
+            ClampHighlightScrollOffset();
+            return GetBaseHighlightSplitIndex(state) + _highlightScrollOffset;
+        }
+
         private SegmentRange GetPriorGroupRange(LiveSplitState state)
         {
-            if (state.CurrentPhase == TimerPhase.NotRunning)
+            if (state.CurrentPhase == TimerPhase.NotRunning &&
+                !UsesHighlightedSplit(state))
                 return SegmentRange.Invalid;
 
             IRun run = state.Run;
 
-            if (state.CurrentPhase == TimerPhase.Ended)
-                return GetGroupRange(run, run.Count - 1);
+            if (UsesHighlightedSplit(state))
+                return GetGroupRange(run, GetHighlightedSplitIndex(state));
 
             SegmentRange currentGroup = GetCurrentGroupRange(state);
             if (!currentGroup.IsValid || currentGroup.Start <= 0)
@@ -220,12 +580,53 @@ namespace LiveSplit.UI.Components
             return GetGroupRange(run, currentGroup.Start - 1);
         }
 
-        private int GetPriorSubsplitIndex(LiveSplitState state)
+        private int GetPriorSubsplitIndex(LiveSplitState state, TimingMethod method)
         {
-            if (state.CurrentPhase == TimerPhase.NotRunning) return -1;
-            if (state.CurrentPhase == TimerPhase.Ended)      return state.Run.Count - 1;
+            if (state.CurrentPhase == TimerPhase.NotRunning &&
+                !UsesHighlightedSplit(state))
+            {
+                return -1;
+            }
+
+            if (UsesHighlightedSplit(state))
+                return GetHighlightedSplitIndex(state);
+
             int prev = state.CurrentSplitIndex - 1;
-            return prev >= 0 ? prev : -1;
+            if (prev < 0) return -1;
+
+            return GetPriorSubsplitIndexAfterShortFilter(state.Run, prev, method);
+        }
+
+        private int GetPriorSubsplitIndexAfterShortFilter(IRun run, int startIndex,
+                                                           TimingMethod method)
+        {
+            if (!_settings.IgnoreShortSubsplits ||
+                _settings.IgnoreShortSubsplitSeconds <= 0d ||
+                run == null)
+            {
+                return startIndex;
+            }
+
+            TimeSpan threshold = TimeSpan.FromSeconds(_settings.IgnoreShortSubsplitSeconds);
+            for (int idx = startIndex; idx >= 0; idx--)
+            {
+                if (!IsChildSubsplit(run, idx))
+                    return idx;
+
+                TimeSpan? actual = GetCompletedRangeTime(run, idx, idx, method);
+                if (!actual.HasValue || actual.Value >= threshold)
+                    return idx;
+            }
+
+            return -1;
+        }
+
+        private static bool IsChildSubsplit(IRun run, int index)
+        {
+            return run != null &&
+                   index >= 0 &&
+                   index < run.Count &&
+                   run[index].Name.StartsWith(SubsplitPrefix);
         }
 
         private void ApplyItemNameLabel(IRun run, int segmentIndex)
@@ -239,13 +640,20 @@ namespace LiveSplit.UI.Components
         {
             if (string.IsNullOrEmpty(name)) return string.Empty;
 
+            string displayName;
             if (_settings.Mode == SplitDetailMode.CurrentSegment ||
                 _settings.Mode == SplitDetailMode.PriorSubsplit)
             {
-                return ExtractSegmentName(name);
+                displayName = ExtractSegmentName(name);
+            }
+            else
+            {
+                displayName = ExtractBraceName(name);
             }
 
-            return ExtractBraceName(name);
+            return _settings.AlwaysRemoveLeadingNumbers
+                ? RemoveLeadingNumberParts(displayName)
+                : displayName;
         }
 
         private static string ExtractSegmentName(string name)
@@ -286,6 +694,65 @@ namespace LiveSplit.UI.Components
             if (close <= 1) return name;
 
             return name.Substring(1, close - 1);
+        }
+
+        private static string RemoveLeadingNumberParts(string name)
+        {
+            if (string.IsNullOrWhiteSpace(name)) return string.Empty;
+
+            string result = name.TrimStart();
+            bool removedAny = false;
+
+            while (!string.IsNullOrEmpty(result))
+            {
+                int tokenEnd = FirstWhitespaceIndex(result);
+                if (tokenEnd <= 0)
+                    break;
+
+                string token = result.Substring(0, tokenEnd);
+                if (!ContainsDigit(token))
+                    break;
+
+                result = result.Substring(tokenEnd).TrimStart();
+                removedAny = true;
+            }
+
+            if (removedAny)
+                result = TrimLeadingNameSeparators(result);
+
+            return string.IsNullOrEmpty(result) ? name.Trim() : result;
+        }
+
+        private static int FirstWhitespaceIndex(string text)
+        {
+            for (int i = 0; i < text.Length; i++)
+            {
+                if (char.IsWhiteSpace(text[i]))
+                    return i;
+            }
+            return -1;
+        }
+
+        private static bool ContainsDigit(string text)
+        {
+            for (int i = 0; i < text.Length; i++)
+            {
+                if (char.IsDigit(text[i]))
+                    return true;
+            }
+            return false;
+        }
+
+        private static string TrimLeadingNameSeparators(string text)
+        {
+            string result = text.TrimStart();
+            while (result.Length > 0 &&
+                   (result[0] == '-' || result[0] == ':' || result[0] == '/' ||
+                    result[0] == '\\' || result[0] == '|' || result[0] == '.'))
+            {
+                result = result.Substring(1).TrimStart();
+            }
+            return result;
         }
 
         // =====================================================================
@@ -339,6 +806,10 @@ namespace LiveSplit.UI.Components
                                                   string comparison,
                                                   TimingMethod method)
         {
+            if (!HasComparison(run, comparison) ||
+                start < 0 || end < start || end >= run.Count)
+                return null;
+
             TimeSpan? endTime = run[end].Comparisons[comparison][method];
             if (endTime == null) return null;
             if (start == 0)     return endTime;
@@ -492,11 +963,12 @@ namespace LiveSplit.UI.Components
             _pr_delta2      = Dash;
             _pr_delta1Color = _settings.TextColor;
             _pr_delta2Color = _settings.TextColor;
+            _backgroundDeltaColor = Color.Transparent;
 
             IRun         run  = state.Run;
             TimingMethod meth = state.CurrentTimingMethod;
-            string       cmp1 = _settings.Comparison1;
-            string       cmp2 = _settings.Comparison2;
+            string       cmp1 = ResolveComparisonChoice(state, run, _settings.Comparison1, "Personal Best");
+            string       cmp2 = ResolveComparisonChoice(state, run, _settings.Comparison2, "Best Segments");
 
             switch (_settings.Mode)
             {
@@ -522,6 +994,160 @@ namespace LiveSplit.UI.Components
         //  Current Split  │ PB:    1:36.55          │
         //                 │ Best:  1:21.35          │ 17:15.84
         //
+        private void SetBackgroundDeltaColor(LiveSplitState state,
+                                             IRun run,
+                                             int start,
+                                             int end,
+                                             TimingMethod method,
+                                             TimeSpan? actual,
+                                             string cmp1,
+                                             string cmp2)
+        {
+            string comparisonName = BackgroundComparisonName(state, run, cmp1);
+            if (string.IsNullOrEmpty(comparisonName))
+            {
+                _backgroundDeltaColor = Color.Transparent;
+                return;
+            }
+
+            TimeSpan? comparison = GetComparisonRangeTime(run, start, end, comparisonName, method);
+            if (!actual.HasValue || !comparison.HasValue)
+            {
+                _backgroundDeltaColor = Color.Transparent;
+                return;
+            }
+
+            TimeSpan delta = actual.Value - comparison.Value;
+            int comparisonIndex = ComparisonSlot(comparisonName, cmp1, cmp2);
+            _backgroundDeltaColor = DeltaColor(state, delta, comparisonIndex);
+        }
+
+        private void SetPriorBackgroundDeltaColor(LiveSplitState state,
+                                                  IRun run,
+                                                  int start,
+                                                  int end,
+                                                  TimingMethod method,
+                                                  TimeSpan? actual,
+                                                  string cmp1,
+                                                  string cmp2,
+                                                  TimeSpan? delta1,
+                                                  TimeSpan? delta2,
+                                                  bool gold)
+        {
+            string comparisonName = BackgroundComparisonName(state, run, cmp1);
+            if (string.IsNullOrEmpty(comparisonName) || !actual.HasValue)
+            {
+                _backgroundDeltaColor = Color.Transparent;
+                return;
+            }
+
+            int comparisonIndex = ComparisonSlot(comparisonName, cmp1, cmp2);
+            TimeSpan? backgroundDelta;
+            Color backgroundColor;
+
+            if (comparisonIndex == 1)
+            {
+                backgroundDelta = delta1;
+                backgroundColor = DeltaColor(state, backgroundDelta, comparisonIndex);
+            }
+            else if (comparisonIndex == 2)
+            {
+                backgroundDelta = delta2;
+                backgroundColor = DeltaColor(state, backgroundDelta, comparisonIndex);
+            }
+            else
+            {
+                TimeSpan? comparison = GetComparisonRangeTime(run, start, end, comparisonName, method);
+                backgroundDelta = comparison.HasValue
+                    ? actual.Value - comparison.Value
+                    : (TimeSpan?)null;
+                backgroundColor = DeltaColor(state, backgroundDelta, comparisonIndex);
+            }
+
+            if (!backgroundDelta.HasValue)
+            {
+                _backgroundDeltaColor = Color.Transparent;
+                return;
+            }
+
+            _backgroundDeltaColor = gold ? GetGoldColor(state) : backgroundColor;
+        }
+
+        private static string BackgroundComparisonName(LiveSplitState state, IRun run, string fallback)
+        {
+            if (state != null && HasComparison(run, state.CurrentComparison))
+                return state.CurrentComparison;
+
+            return HasComparison(run, fallback) ? fallback : string.Empty;
+        }
+
+        private static string HighlightComparisonName(LiveSplitState state, IRun run, string fallback)
+        {
+            if (state != null && HasComparison(run, state.CurrentComparison))
+                return state.CurrentComparison;
+
+            return HasComparison(run, fallback) ? fallback : FirstComparisonName(run);
+        }
+
+        private static string ResolveComparisonChoice(LiveSplitState state, IRun run,
+                                                      string comparison, string fallback)
+        {
+            string resolved = comparison;
+            if (string.Equals(comparison, SplitDetailSettings.CurrentComparisonChoice,
+                              StringComparison.Ordinal))
+            {
+                resolved = state != null ? state.CurrentComparison : null;
+            }
+
+            if (HasComparison(run, resolved))
+                return resolved;
+            if (HasComparison(run, fallback))
+                return fallback;
+            return FirstComparisonName(run);
+        }
+
+        private static bool HasComparison(IRun run, string comparison)
+        {
+            if (run == null || string.IsNullOrEmpty(comparison))
+                return false;
+
+            try
+            {
+                foreach (string runComparison in run.Comparisons)
+                {
+                    if (string.Equals(runComparison, comparison, StringComparison.Ordinal))
+                        return true;
+                }
+            }
+            catch { }
+
+            return false;
+        }
+
+        private static string FirstComparisonName(IRun run)
+        {
+            if (run == null)
+                return string.Empty;
+
+            try
+            {
+                foreach (string comparison in run.Comparisons)
+                    return comparison;
+            }
+            catch { }
+
+            return string.Empty;
+        }
+
+        private static int ComparisonSlot(string comparison, string cmp1, string cmp2)
+        {
+            if (string.Equals(comparison, cmp1, StringComparison.Ordinal))
+                return 1;
+            if (string.Equals(comparison, cmp2, StringComparison.Ordinal))
+                return 2;
+            return 0;
+        }
+
         private void CalcCurrentSplit(LiveSplitState state, IRun run,
                                        TimingMethod method, string cmp1, string cmp2,
                                        bool isCurrentSubsplit)
@@ -530,9 +1156,17 @@ namespace LiveSplit.UI.Components
             _cs_cmp1Label = AbbreviateComparison(cmp1);
             _cs_cmp2Label = AbbreviateComparison(cmp2);
 
-            bool active = (state.CurrentPhase == TimerPhase.Running ||
-                           state.CurrentPhase == TimerPhase.Paused);
-            if (!active) return;
+            bool live = (state.CurrentPhase == TimerPhase.Running ||
+                         state.CurrentPhase == TimerPhase.Paused);
+            bool highlight = UsesHighlightedSplit(state);
+            if (!live && !highlight) return;
+
+            bool comparisonHighlight = highlight &&
+                                       state.CurrentPhase == TimerPhase.NotRunning;
+            bool completedHighlight = highlight && !comparisonHighlight;
+            string highlightComparison = comparisonHighlight
+                ? HighlightComparisonName(state, run, cmp1)
+                : string.Empty;
 
             int rangeStart;
             int rangeEnd;
@@ -540,33 +1174,51 @@ namespace LiveSplit.UI.Components
 
             if (isCurrentSubsplit)
             {
-                int idx = state.CurrentSplitIndex;
+                int idx = highlight ? GetHighlightedSplitIndex(state) : state.CurrentSplitIndex;
                 if (idx < 0 || idx >= run.Count) return;
 
                 rangeStart = idx;
                 rangeEnd = idx;
-                elapsed = GetActiveSegmentTime(run, state, idx, method);
+                if (comparisonHighlight)
+                    elapsed = GetComparisonRangeTime(run, idx, idx, highlightComparison, method);
+                else if (completedHighlight)
+                    elapsed = GetCompletedRangeTime(run, idx, idx, method);
+                else
+                    elapsed = GetActiveSegmentTime(run, state, idx, method);
                 ApplyItemNameLabel(run, idx);
             }
             else
             {
-                SegmentRange group = GetCurrentGroupRange(state);
+                SegmentRange group = highlight
+                    ? GetGroupRange(run, GetHighlightedSplitIndex(state))
+                    : GetCurrentGroupRange(state);
                 if (!group.IsValid) return;
 
                 rangeStart = group.Start;
                 rangeEnd = group.End;
-                elapsed = GetActiveRangeTime(run, state, group.Start, group.End, method);
+                if (comparisonHighlight)
+                    elapsed = GetComparisonRangeTime(run, group.Start, group.End,
+                                                     highlightComparison, method);
+                else if (completedHighlight)
+                    elapsed = GetCompletedRangeTime(run, group.Start, group.End, method);
+                else
+                    elapsed = GetActiveRangeTime(run, state, group.Start, group.End, method);
                 ApplyItemNameLabel(run, group.End);
             }
+
+            if (completedHighlight && !elapsed.HasValue)
+                return;
 
             TimeSpan? t1 = GetComparisonRangeTime(run, rangeStart, rangeEnd, cmp1, method);
             TimeSpan? t2 = GetComparisonRangeTime(run, rangeStart, rangeEnd, cmp2, method);
 
             _cs_cmp1Time = FormatTime(t1, _settings.Accuracy);
             _cs_cmp2Time = FormatTime(t2, _settings.Accuracy);
+            SetBackgroundDeltaColor(state, run, rangeStart, rangeEnd, method,
+                                    elapsed, cmp1, cmp2);
 
             _rightText = FormatTime(elapsed, _settings.Accuracy);
-            // Live timer is never gold (run is still in progress)
+            // Live/review timer is never gold.
         }
 
         // ── Previous / Live Split and Segment modes ──────────────────────────
@@ -581,11 +1233,18 @@ namespace LiveSplit.UI.Components
                                      bool isPriorSubsplit)
         {
             // Determine if we should display live data or prior data
+            bool highlight = UsesHighlightedSplit(state);
             bool isLosingTime = false;
-            if (isPriorSubsplit)
-                isLosingTime = IsCurrentSegmentLosingTime(state, run, method, cmp1, cmp2);
-            else
-                isLosingTime = IsCurrentSplitLosingTime(state, run, method, cmp1, cmp2);
+            if (!highlight)
+            {
+                if (isPriorSubsplit)
+                    isLosingTime = IsCurrentSegmentLosingTime(state, run, method, cmp1, cmp2);
+                else
+                    isLosingTime = IsCurrentSplitLosingTime(state, run, method, cmp1, cmp2);
+            }
+
+            _cs_cmp1Label = AbbreviateComparison(cmp1);
+            _cs_cmp2Label = AbbreviateComparison(cmp2);
 
             // If item-name labels are enabled, live overrides should show the
             // active split/segment name directly, never the generated Live label.
@@ -593,14 +1252,54 @@ namespace LiveSplit.UI.Components
                 ? string.Empty
                 : _settings.LabelForDisplay(isLosingTime);
 
-            if (state.CurrentPhase == TimerPhase.NotRunning)
+            if (state.CurrentPhase == TimerPhase.NotRunning && !highlight)
                 return;
 
             TimeSpan? actual = null, cmp1Time = null, cmp2Time = null;
             int rangeStart = 0, rangeEnd = 0;
             bool hasRange = false;
 
-            if (isLosingTime)
+            if (highlight)
+            {
+                bool comparisonHighlight = state.CurrentPhase == TimerPhase.NotRunning;
+                string highlightComparison = comparisonHighlight
+                    ? HighlightComparisonName(state, run, cmp1)
+                    : string.Empty;
+
+                if (isPriorSubsplit)
+                {
+                    int idx = GetHighlightedSplitIndex(state);
+                    if (idx >= 0 && idx < run.Count)
+                    {
+                        rangeStart = rangeEnd = idx;
+                        hasRange = true;
+                        actual = comparisonHighlight
+                            ? GetComparisonRangeTime(run, idx, idx, highlightComparison, method)
+                            : GetCompletedRangeTime(run, idx, idx, method);
+                    }
+                }
+                else
+                {
+                    SegmentRange group = GetGroupRange(run, GetHighlightedSplitIndex(state));
+                    if (group.IsValid)
+                    {
+                        rangeStart = group.Start;
+                        rangeEnd = group.End;
+                        hasRange = true;
+                        actual = comparisonHighlight
+                            ? GetComparisonRangeTime(run, group.Start, group.End,
+                                                     highlightComparison, method)
+                            : GetCompletedRangeTime(run, group.Start, group.End, method);
+                    }
+                }
+
+                if (hasRange && (comparisonHighlight || actual.HasValue))
+                {
+                    cmp1Time = GetComparisonRangeTime(run, rangeStart, rangeEnd, cmp1, method);
+                    cmp2Time = GetComparisonRangeTime(run, rangeStart, rangeEnd, cmp2, method);
+                }
+            }
+            else if (isLosingTime)
             {
                 // Live mode: show the current active item
                 if (isPriorSubsplit)
@@ -634,7 +1333,7 @@ namespace LiveSplit.UI.Components
                 // Prior mode: show the prior completed item
                 if (isPriorSubsplit)
                 {
-                    int idx = GetPriorSubsplitIndex(state);
+                    int idx = GetPriorSubsplitIndex(state, method);
                     if (idx >= 0)
                     {
                         rangeStart = rangeEnd = idx;
@@ -663,6 +1362,13 @@ namespace LiveSplit.UI.Components
                 ApplyItemNameLabel(run, rangeEnd);
 
             // Right side: actual time — always TimeColor, never gold.
+            if (highlight &&
+                state.CurrentPhase != TimerPhase.NotRunning &&
+                !actual.HasValue)
+            {
+                return;
+            }
+
             _rightText      = FormatTime(actual, _settings.Accuracy);
             _rightTextColor = _settings.TimeColor;
 
@@ -678,7 +1384,9 @@ namespace LiveSplit.UI.Components
             // become gold instead of the usual ahead/behind colors — matching the
             // visual behavior of LiveSplit's Previous Segment component.
             // Note: Live mode never displays gold (still in progress).
-            bool gold = !isLosingTime && IsNewBest(run, rangeStart, rangeEnd, actual, method);
+            bool gold = !isLosingTime &&
+                        state.CurrentPhase != TimerPhase.NotRunning &&
+                        IsNewBest(run, rangeStart, rangeEnd, actual, method);
             if (gold)
             {
                 Color goldColor   = GetGoldColor(state);
@@ -697,6 +1405,9 @@ namespace LiveSplit.UI.Components
                 _pr_delta2      = string.Empty;
                 _pr_delta2Color = _settings.TextColor;
             }
+
+            SetPriorBackgroundDeltaColor(state, run, rangeStart, rangeEnd, method,
+                                         actual, cmp1, cmp2, delta1, delta2, gold);
         }
 
         // =====================================================================
@@ -707,76 +1418,449 @@ namespace LiveSplit.UI.Components
         {
             var ls = state.LayoutSettings;
 
-            DrawBackground(g, ls, width, height);
+            DrawBackground(g, width, height);
 
-            Font mainFont = ls.TextFont ?? SystemFonts.DefaultFont;
+            Font baseFont = ls.TextFont ?? SystemFonts.DefaultFont;
+            using (Font leftFont = CreateColumnFont(baseFont, _settings.LeftColumnBold))
+            using (Font middleLabelFont = CreateColumnFont(baseFont, _settings.MiddleLabelBold))
+            using (Font middleValueFont = CreateColumnFont(baseFont, _settings.MiddleValueBold))
+            using (Font rightFont = CreateColumnFont(baseFont, _settings.RightColumnBold))
+            {
+                float middleLabelFontH = g.MeasureString("Ay", middleLabelFont).Height;
+                float middleValueFontH = g.MeasureString("Ay", middleValueFont).Height;
+                float middleFontH = Math.Max(middleLabelFontH, middleValueFontH);
+                _rowHeight = Math.Max(30f, Math.Max(
+                    g.MeasureString("Ay", leftFont).Height,
+                    Math.Max(middleFontH, g.MeasureString("Ay", rightFont).Height)));
+                height = Math.Max(height, _rowHeight);
 
-            _rowHeight = Math.Max(30f, g.MeasureString("Ay", mainFont).Height);
-            height = Math.Max(height, _rowHeight);
+                Color textColor = _settings.TextColor;
+                Color timeColor = _settings.TimeColor;
 
-            Color textColor = _settings.TextColor;
-            Color timeColor = _settings.TimeColor;
-
-            float colGap = Math.Max(0f, _settings.ColumnSpacing);
-
-            float rightColW = Math.Min(
-                RightColumnWidth,
-                Math.Max(22f, g.MeasureString(_rightText, mainFont).Width + 1f));
-
+                float valueRightOffset = SplitDetailLayoutLinks.ResolveColumnSpacing(
+                    _settings.MiddleColumnLinkGroup,
+                    _settings.ColumnSpacing);
+                bool fixedNameColumns = _settings.UseItemName && !_settings.AutoFitNameColumns;
+                float rightTextNaturalW = Math.Max(0f, g.MeasureString(_rightText, rightFont).Width + 1f);
             // ── Column geometry ───────────────────────────────────────────────
-            float xLeft  = OuterPad;
-            float xRight = width - OuterPad - rightColW;
+                float xLeft  = OuterPad;
+                float xRight;
+                float rightColW;
+                float rightBorder = Math.Max(xLeft, width - OuterPad);
+                float rightValueLeft;
+                float labelColW;
 
-            string labelMeasureText = _settings.MeasureLabelText(_labelText);
-            SizeF labelSz = g.MeasureString(labelMeasureText, mainFont);
-            float naturalLabelW = Math.Max(MinLabelColumnWidth, labelSz.Width + 0.5f);
-            float maxLabelW = Math.Max(0f, xRight - xLeft - colGap - MinMiddleColumnWidth);
-            float labelColW = Math.Min(naturalLabelW, maxLabelW);
-            string labelDrawText = ShortenLabelToFit(g, _labelText, mainFont, labelColW);
-
-            float xMid   = xLeft + labelColW + colGap;
-            float midW   = Math.Max(0f, xRight - xMid);
-
-            float fontH = g.MeasureString("Ay", mainFont).Height;
-            float textY = Math.Max(0f, (height - fontH) / 2f);
-
-            var fmtLeft = new StringFormat
+            if (fixedNameColumns)
             {
-                Alignment   = StringAlignment.Near,
-                Trimming    = StringTrimming.EllipsisCharacter,
-                FormatFlags = StringFormatFlags.NoWrap,
-            };
-            var fmtRight = new StringFormat
+                float innerW = Math.Max(0f, width - OuterPad * 2f);
+                float colW = innerW / 3f;
+
+                xRight = xLeft + colW * 2f;
+                rightColW = Math.Max(0f, colW);
+                float rightValueW = Math.Min(rightColW, rightTextNaturalW);
+                rightValueLeft = rightBorder - rightValueW;
+            }
+            else
             {
-                Alignment   = StringAlignment.Far,
-                Trimming    = StringTrimming.EllipsisCharacter,
-                FormatFlags = StringFormatFlags.NoWrap,
-            };
+                rightColW = Math.Min(
+                    RightColumnWidth,
+                    Math.Max(22f, rightTextNaturalW));
+
+                xRight = rightBorder - rightColW;
+                rightValueLeft = rightBorder - rightTextNaturalW;
+            }
+
+                float localValueRight = Math.Min(
+                    rightBorder - Math.Max(0f, valueRightOffset),
+                    rightValueLeft - Math.Max(0f, _settings.MiddleValueTimeGap));
+                localValueRight = Math.Max(xLeft, localValueRight);
+
+                float valueRight = SplitDetailLayoutLinks.ResolveMiddleEnd(
+                    _settings.MiddleColumnLinkGroup,
+                    _layoutLinkId,
+                    localValueRight);
+                valueRight = Math.Max(xLeft, Math.Min(valueRight, localValueRight));
+
+                MiddleLayout middleLayout = CalculateMiddleLayout(
+                    g, middleLabelFont, middleValueFont,
+                    fixedNameColumns, xLeft, rightBorder, valueRight);
+                labelColW = Math.Max(0f, middleLayout.LeftBound - xLeft - LabelComparisonPad);
+
+                SplitDetailNameShortening shortening = _settings.UseItemName
+                    ? _settings.NameShortening
+                    : SplitDetailNameShortening.EndEllipsis;
+                string labelDrawText = ShortenLabelToFit(g, _labelText, leftFont, labelColW, shortening);
+
+                float leftFontH = g.MeasureString("Ay", leftFont).Height;
+                float rightFontH = g.MeasureString("Ay", rightFont).Height;
+                float leftTextY = Math.Max(0f, (height - leftFontH) / 2f);
+                float middleTextY = Math.Max(0f, (height - middleFontH) / 2f);
+                float rightTextY = Math.Max(0f, (height - rightFontH) / 2f);
+
+                var fmtLeft = new StringFormat
+                {
+                    Alignment   = StringAlignment.Near,
+                    Trimming    = StringTrimming.EllipsisCharacter,
+                    FormatFlags = StringFormatFlags.NoWrap,
+                };
+                var fmtRight = new StringFormat
+                {
+                    Alignment   = StringAlignment.Far,
+                    Trimming    = StringTrimming.EllipsisCharacter,
+                    FormatFlags = StringFormatFlags.NoWrap,
+                };
 
             // ── Left: mode label ──────────────────────────────────────────────
-            if (!string.IsNullOrEmpty(labelDrawText) && labelColW > 0f)
-                DrawTextWithEffectsClipped(g, labelDrawText, mainFont, textColor,
-                                           new RectangleF(xLeft, textY, labelColW, fontH),
-                                           fmtLeft, ls);
+                if (!string.IsNullOrEmpty(labelDrawText) && labelColW > 0f)
+                    DrawTextWithEffectsClipped(g, labelDrawText, leftFont, textColor,
+                                               new RectangleF(xLeft, leftTextY, labelColW, leftFontH),
+                                               fmtLeft, ls);
 
             // ── Right: time / timer ───────────────────────────────────────────
-            DrawTextWithEffects(g, _rightText, mainFont, _rightTextColor,
-                                new RectangleF(xRight, textY, rightColW, fontH),
-                                fmtRight, ls);
+                if (fixedNameColumns)
+                    DrawTextWithEffectsClipped(g, _rightText, rightFont, _rightTextColor,
+                                               new RectangleF(xRight, rightTextY, rightColW, rightFontH),
+                                               fmtRight, ls);
+                else
+                    DrawTextWithEffects(g, _rightText, rightFont, _rightTextColor,
+                                        new RectangleF(xRight, rightTextY, rightColW, rightFontH),
+                                        fmtRight, ls);
 
             // ── Middle: mode-dependent ────────────────────────────────────────
+                switch (_settings.Mode)
+                {
+                    case SplitDetailMode.CurrentSplit:
+                    case SplitDetailMode.CurrentSegment:
+                        DrawCurrentSplitMiddle(g, middleLabelFont, middleValueFont, textColor, timeColor,
+                                               middleLayout, height,
+                                               fmtLeft, fmtRight, ls);
+                        break;
+                    case SplitDetailMode.PriorSplit:
+                    case SplitDetailMode.PriorSubsplit:
+                        if (UsePriorStackedMiddle(fixedNameColumns))
+                            DrawPriorMiddleStacked(g, middleLabelFont, middleValueFont,
+                                                   middleLayout, height,
+                                                   middleTextY, middleFontH,
+                                                   fixedNameColumns,
+                                                   fmtLeft, fmtRight, ls);
+                        else
+                            DrawPriorMiddle(g, middleValueFont, textColor,
+                                            middleLayout, middleTextY, middleFontH,
+                                            fmtLeft, fmtRight, ls);
+                        break;
+                }
+            }
+        }
+
+        private static Font CreateColumnFont(Font baseFont, bool bold)
+        {
+            FontStyle style = bold
+                ? (baseFont.Style | FontStyle.Bold)
+                : (baseFont.Style & ~FontStyle.Bold);
+
+            try
+            {
+                return new Font(baseFont, style);
+            }
+            catch (ArgumentException)
+            {
+                return (Font)baseFont.Clone();
+            }
+        }
+
+        private bool UsePriorStackedMiddle(bool fixedNameColumns)
+        {
+            return fixedNameColumns || _settings.ComparisonCount == 1;
+        }
+
+        private MiddleLayout CalculateMiddleLayout(Graphics g, Font labelMainFont, Font valueMainFont,
+                                                   bool fixedNameColumns,
+                                                   float xLeft, float rightBorder,
+                                                   float valueRight)
+        {
             switch (_settings.Mode)
             {
                 case SplitDetailMode.CurrentSplit:
                 case SplitDetailMode.CurrentSegment:
-                    DrawCurrentSplitMiddle(g, mainFont, textColor, timeColor,
-                                           xMid, midW, height, fmtLeft, fmtRight, ls);
-                    break;
+                {
+                    float labelSmallPt = Math.Max(MinSmallFontPt, labelMainFont.Size * SmallFontScale);
+                    float valueSmallPt = Math.Max(MinSmallFontPt, valueMainFont.Size * SmallFontScale);
+                    using (var labelSmallFont = new Font(labelMainFont.FontFamily, labelSmallPt, labelMainFont.Style))
+                    using (var valueSmallFont = new Font(valueMainFont.FontFamily, valueSmallPt, valueMainFont.Style))
+                    {
+                        bool twoLines = (_settings.ComparisonCount == 2);
+                        return CalculateStackedMiddleLayout(
+                            g, labelSmallFont, valueSmallFont,
+                            _cs_cmp1Label + ":", _cs_cmp1Time,
+                            twoLines ? _cs_cmp2Label + ":" : string.Empty,
+                            twoLines ? _cs_cmp2Time : string.Empty,
+                            xLeft, rightBorder, valueRight);
+                    }
+                }
+
                 case SplitDetailMode.PriorSplit:
                 case SplitDetailMode.PriorSubsplit:
-                    DrawPriorMiddle(g, mainFont, textColor,
-                                    xMid, midW, textY, fontH, fmtLeft, fmtRight, ls);
-                    break;
+                    if (UsePriorStackedMiddle(fixedNameColumns))
+                    {
+                        bool twoLines = (_settings.ComparisonCount == 2 && !string.IsNullOrEmpty(_pr_delta2));
+                        if (fixedNameColumns)
+                        {
+                            float labelSmallPt = Math.Max(MinSmallFontPt, labelMainFont.Size * SmallFontScale);
+                            float valueSmallPt = Math.Max(MinSmallFontPt, valueMainFont.Size * SmallFontScale);
+                            using (var labelSmallFont = new Font(labelMainFont.FontFamily, labelSmallPt, labelMainFont.Style))
+                            using (var valueSmallFont = new Font(valueMainFont.FontFamily, valueSmallPt, valueMainFont.Style))
+                            {
+                                return CalculateStackedMiddleLayout(
+                                    g, labelSmallFont, valueSmallFont,
+                                    _cs_cmp1Label + ":", _pr_delta1,
+                                    twoLines ? _cs_cmp2Label + ":" : string.Empty,
+                                    twoLines ? _pr_delta2 : string.Empty,
+                                    xLeft, rightBorder, valueRight);
+                            }
+                        }
+
+                        float singleLabelSmallPt = Math.Max(MinSmallFontPt, labelMainFont.Size * SmallFontScale);
+                        using (var labelSmallFont = new Font(labelMainFont.FontFamily, singleLabelSmallPt, labelMainFont.Style))
+                        {
+                            return CalculateStackedMiddleLayout(
+                                g, labelSmallFont, valueMainFont,
+                                _cs_cmp1Label + ":", _pr_delta1,
+                                string.Empty, string.Empty,
+                                xLeft, rightBorder, valueRight);
+                        }
+                    }
+
+                    return CalculateCompactMiddleLayout(g, valueMainFont, xLeft, valueRight);
+
+                default:
+                    return new MiddleLayout(valueRight, xLeft, 0f, xLeft);
+            }
+        }
+
+        private MiddleLayout CalculateStackedMiddleLayout(Graphics g, Font labelFont, Font valueFont,
+                                                          string label1, string value1,
+                                                          string label2, string value2,
+                                                          float xLeft,
+                                                          float rightBorder,
+                                                          float valueRight)
+        {
+            float labelW = Math.Max(MeasureTextWidth(g, label1, labelFont),
+                                    MeasureTextWidth(g, label2, labelFont));
+            float valueW = Math.Max(MeasureTextWidth(g, value1, valueFont),
+                                    MeasureTextWidth(g, value2, valueFont));
+
+            if (labelW <= 0f)
+            {
+                float left = Math.Max(xLeft, valueRight - valueW);
+                return new MiddleLayout(valueRight, left, 0f, left);
+            }
+
+            float labelValueGap = Math.Max(0f, _settings.MiddleLabelValueGap);
+            float labelRightLimit = Math.Min(
+                rightBorder - Math.Max(0f, _settings.MiddleLabelRightOffset),
+                valueRight - valueW - labelValueGap);
+            labelRightLimit = Math.Min(labelRightLimit, valueRight - labelValueGap);
+
+            bool linkLabels = _settings.LinkMiddleLabels &&
+                              _settings.MiddleColumnLinkGroup > 0;
+            float labelLeftLimit = labelRightLimit - labelW;
+            float labelX = linkLabels
+                ? SplitDetailLayoutLinks.ResolveLabelLeft(
+                    _settings.MiddleColumnLinkGroup, _layoutLinkId, labelLeftLimit)
+                : labelLeftLimit;
+            labelX = Math.Min(labelX, labelLeftLimit);
+
+            labelX = Math.Max(xLeft, labelX);
+            float safeLabelW = Math.Max(0f, Math.Min(labelW, valueRight - valueW - labelValueGap - labelX));
+            return new MiddleLayout(valueRight, labelX, safeLabelW, labelX, 0f);
+        }
+
+        private MiddleLayout CalculateCompactMiddleLayout(Graphics g, Font font,
+                                                          float xLeft, float valueRight)
+        {
+            float blockW = MeasurePriorCompactMiddleWidth(g, font);
+            float left = Math.Max(xLeft, valueRight - blockW);
+            return new MiddleLayout(valueRight, left, 0f, left);
+        }
+
+        private float MeasureMinimumMiddleWidth(Graphics g, Font mainFont, bool fixedNameColumns)
+        {
+            switch (_settings.Mode)
+            {
+                case SplitDetailMode.CurrentSplit:
+                case SplitDetailMode.CurrentSegment:
+                    return MeasureCurrentSplitMiddleWidth(g, mainFont);
+                case SplitDetailMode.PriorSplit:
+                case SplitDetailMode.PriorSubsplit:
+                    return fixedNameColumns
+                        ? MeasurePriorStackedMiddleWidth(g, mainFont)
+                        : MeasurePriorCompactMiddleWidth(g, mainFont);
+                default:
+                    return MinMiddleColumnWidth;
+            }
+        }
+
+        private float MeasureCurrentSplitMiddleWidth(Graphics g, Font mainFont)
+        {
+            float smallPt = Math.Max(MinSmallFontPt, mainFont.Size * SmallFontScale);
+            using (var smallFont = new Font(mainFont.FontFamily, smallPt, mainFont.Style))
+            {
+                bool twoLines = (_settings.ComparisonCount == 2);
+                string lbl1 = _cs_cmp1Label + ":";
+                string lbl2 = twoLines ? _cs_cmp2Label + ":" : string.Empty;
+                return MeasureLabelValueBlockWidth(g, smallFont,
+                    lbl1, _cs_cmp1Time,
+                    lbl2, twoLines ? _cs_cmp2Time : string.Empty);
+            }
+        }
+
+        private float MeasurePriorStackedMiddleWidth(Graphics g, Font mainFont)
+        {
+            bool twoLines = (_settings.ComparisonCount == 2 && !string.IsNullOrEmpty(_pr_delta2));
+
+            if (!twoLines)
+                return MeasureLabelValueBlockWidth(g, mainFont, _cs_cmp1Label + ":", _pr_delta1, string.Empty, string.Empty);
+
+            float smallPt = Math.Max(MinSmallFontPt, mainFont.Size * SmallFontScale);
+            using (var smallFont = new Font(mainFont.FontFamily, smallPt, mainFont.Style))
+            {
+                return MeasureLabelValueBlockWidth(g, smallFont,
+                    _cs_cmp1Label + ":", _pr_delta1,
+                    _cs_cmp2Label + ":", _pr_delta2);
+            }
+        }
+
+        private float MeasurePriorCompactMiddleWidth(Graphics g, Font font)
+        {
+            string sep = _settings.Separator;
+            bool hasSep = !string.IsNullOrEmpty(sep);
+            bool onlyOne = (_settings.ComparisonCount == 1 || string.IsNullOrEmpty(_pr_delta2));
+
+            float d1W = MeasureTextWidth(g, _pr_delta1, font);
+            if (onlyOne)
+                return d1W;
+
+            float d2W = MeasureTextWidth(g, _pr_delta2, font);
+            if (hasSep)
+                return d1W + MeasureTextWidth(g, sep, font) + d2W + 2f;
+
+            return d1W + d2W + 1f;
+        }
+
+        private static float MeasureLabelValueBlockWidth(Graphics g, Font font,
+                                                         string label1, string value1,
+                                                         string label2, string value2)
+        {
+            float labelW = Math.Max(MeasureTextWidth(g, label1, font), MeasureTextWidth(g, label2, font));
+            float valueW = Math.Max(MeasureTextWidth(g, value1, font), MeasureTextWidth(g, value2, font));
+
+            if (labelW <= 0f) return valueW;
+            if (valueW <= 0f) return labelW;
+            return labelW + MiddleTextGap + valueW;
+        }
+
+        private static float MeasureTextWidth(Graphics g, string text, Font font)
+        {
+            if (string.IsNullOrEmpty(text)) return 0f;
+            return g.MeasureString(text, font).Width + 1f;
+        }
+
+        private static void DrawLabelValueLine(Graphics g, Font labelFont, Font valueFont,
+                                               string label, Color labelColor,
+                                               string value, Color valueColor,
+                                               float x, float y, float width, float height,
+                                               StringFormat fmtLeft, StringFormat fmtRight,
+                                               LiveSplit.Options.LayoutSettings ls)
+        {
+            float labelW = Math.Min(width, MeasureTextWidth(g, label, labelFont));
+            var layout = new MiddleLayout(x + width, x, labelW, x);
+            DrawLabelValueLine(g, labelFont, valueFont, label, labelColor, value, valueColor,
+                               layout, y, height,
+                               false, false,
+                               fmtLeft, fmtRight, ls);
+        }
+
+        private static void DrawLabelValueLine(Graphics g, Font labelFont, Font valueFont,
+                                               string label, Color labelColor,
+                                               string value, Color valueColor,
+                                               MiddleLayout layout,
+                                               float y, float height,
+                                               bool shortenDelta,
+                                               bool fitValue,
+                                               StringFormat fmtLeft, StringFormat fmtRight,
+                                               LiveSplit.Options.LayoutSettings ls,
+                                               bool alignValueByPathRight = false)
+        {
+            if (layout.ValueRight <= layout.LabelX + 1f)
+                return;
+
+            float labelW = layout.LabelW;
+            float gap = (!string.IsNullOrEmpty(label) && !string.IsNullOrEmpty(value))
+                ? layout.LabelValueGap
+                : 0f;
+            float labelRight = layout.LabelX + labelW;
+            float valueAvailableW = Math.Max(0f, layout.ValueRight - labelRight - gap);
+            string drawValue = shortenDelta
+                ? ShortenDeltaToFit(g, value, valueFont, valueAvailableW)
+                : value;
+            float valueW = Math.Min(valueAvailableW, MeasureTextWidth(g, drawValue, valueFont));
+            float valueRight = layout.ValueRight;
+            if (alignValueByPathRight && !fitValue)
+                valueRight += MeasureRightAlignmentAdjustment(g, drawValue, valueFont);
+            float valueX = valueRight - valueW;
+
+            if (!string.IsNullOrEmpty(label) && labelW > 0f)
+            {
+                float labelH = Math.Min(height, labelFont.GetHeight(g));
+                float labelY = y + Math.Max(0f, (height - labelH) / 2f);
+                DrawTextWithEffectsClipped(g, label, labelFont, labelColor,
+                                           new RectangleF(layout.LabelX, labelY, labelW, height),
+                                           fmtLeft, ls);
+            }
+
+            if (!string.IsNullOrEmpty(drawValue) && valueW > 0f)
+            {
+                RectangleF valueRect = new RectangleF(valueX, y, valueW, height);
+                if (fitValue)
+                    DrawTextWithEffectsFit(g, drawValue, valueFont, valueColor, valueRect, fmtRight, ls);
+                else
+                    DrawTextWithEffectsClipped(g, drawValue, valueFont, valueColor, valueRect, fmtRight, ls);
+            }
+        }
+
+        private static float MeasureRightAlignmentAdjustment(Graphics g, string text, Font font)
+        {
+            if (string.IsNullOrEmpty(text) || font == null)
+                return 0f;
+
+            float measuredW = g.MeasureString(text, font).Width;
+            float visualRight = MeasureTextPathRight(g, text, font);
+            if (visualRight <= 0f)
+                return 0f;
+
+            return Math.Max(0f, measuredW - visualRight);
+        }
+
+        private static float MeasureTextPathRight(Graphics g, string text, Font font)
+        {
+            try
+            {
+                using (var path = new GraphicsPath())
+                using (var format = new StringFormat())
+                {
+                    format.Alignment = StringAlignment.Near;
+                    format.LineAlignment = StringAlignment.Near;
+                    format.Trimming = StringTrimming.None;
+                    format.FormatFlags = StringFormatFlags.NoWrap;
+
+                    path.AddString(text, font.FontFamily, (int)font.Style, GetFontSize(g, font),
+                        new RectangleF(0f, 0f, 9999f, 9999f), format);
+                    return path.GetBounds().Right;
+                }
+            }
+            catch (ArgumentException)
+            {
+                return 0f;
             }
         }
 
@@ -785,18 +1869,20 @@ namespace LiveSplit.UI.Components
         //   PB:    1:36.55       ← line 1 (cmp1)
         //   Best:  1:21.35       ← line 2 (cmp2, only if ComparisonCount == 2)
         //
-        private void DrawCurrentSplitMiddle(Graphics g, Font mainFont,
+        private void DrawCurrentSplitMiddle(Graphics g, Font labelMainFont, Font valueMainFont,
                                      Color textColor, Color timeColor,
-                                     float xMid, float midW, float height,
+                                     MiddleLayout layout, float height,
                                      StringFormat fmtLeft, StringFormat fmtRight,
                                      LiveSplit.Options.LayoutSettings ls)
         {
-            float smallPt = Math.Max(MinSmallFontPt, mainFont.Size * SmallFontScale);
-            using (var smallFont = new Font(mainFont.FontFamily, smallPt, FontStyle.Regular))
+            float labelSmallPt = Math.Max(MinSmallFontPt, labelMainFont.Size * SmallFontScale);
+            float valueSmallPt = Math.Max(MinSmallFontPt, valueMainFont.Size * SmallFontScale);
+            using (var labelSmallFont = new Font(labelMainFont.FontFamily, labelSmallPt, labelMainFont.Style))
+            using (var valueSmallFont = new Font(valueMainFont.FontFamily, valueSmallPt, valueMainFont.Style))
             {
                 bool twoLines = (_settings.ComparisonCount == 2);
 
-                float lineH    = smallFont.GetHeight(g);
+                float lineH    = Math.Max(labelSmallFont.GetHeight(g), valueSmallFont.GetHeight(g));
                 float lineStep = lineH * 0.68f;
                 float totalH   = twoLines ? (lineH + lineStep) : lineH;
                 float y1       = (height - totalH) / 2f;
@@ -805,37 +1891,91 @@ namespace LiveSplit.UI.Components
                 string lbl1 = _cs_cmp1Label + ":";
                 string lbl2 = twoLines ? _cs_cmp2Label + ":" : string.Empty;
 
-                float labelSubW = g.MeasureString(lbl1, smallFont).Width;
-                if (twoLines)
-                    labelSubW = Math.Max(labelSubW, g.MeasureString(lbl2, smallFont).Width);
-                labelSubW += 2f;
-
-                float timeSubW = g.MeasureString(_cs_cmp1Time, smallFont).Width;
-                if (twoLines)
-                    timeSubW = Math.Max(timeSubW, g.MeasureString(_cs_cmp2Time, smallFont).Width);
-                timeSubW += 4f;
-
-                if (labelSubW + timeSubW > midW)
-                    timeSubW = Math.Max(0f, midW - labelSubW);
-
-                Color cmp1Color = ComparisonColor(1, timeColor);
-                Color cmp2Color = ComparisonColor(2, timeColor);
-
+                Color cmp1LabelColor = ComparisonLabelColor(1);
+                Color cmp2LabelColor = ComparisonLabelColor(2);
                 // Line 1: cmp1 label + cmp1 time
-                DrawTextWithEffects(g, lbl1, smallFont, cmp1Color,
-                                    new RectangleF(xMid, y1, labelSubW, lineH), fmtLeft, ls);
-                DrawTextWithEffectsFit(g, _cs_cmp1Time, smallFont, cmp1Color,
-                                       new RectangleF(xMid + labelSubW, y1, timeSubW, lineH),
-                                       fmtRight, ls, MinSmallFontPt);
+                DrawLabelValueLine(g, labelSmallFont, valueSmallFont,
+                                   lbl1, cmp1LabelColor,
+                                   _cs_cmp1Time, timeColor,
+                                   layout, y1, lineH,
+                                   false, true,
+                                   fmtLeft, fmtRight, ls);
 
                 // Line 2: cmp2 label + cmp2 time (only if two comparisons)
                 if (twoLines)
                 {
-                    DrawTextWithEffects(g, lbl2, smallFont, cmp2Color,
-                                        new RectangleF(xMid, y2, labelSubW, lineH), fmtLeft, ls);
-                    DrawTextWithEffectsFit(g, _cs_cmp2Time, smallFont, cmp2Color,
-                                           new RectangleF(xMid + labelSubW, y2, timeSubW, lineH),
-                                           fmtRight, ls, MinSmallFontPt);
+                    DrawLabelValueLine(g, labelSmallFont, valueSmallFont,
+                                       lbl2, cmp2LabelColor,
+                                       _cs_cmp2Time, timeColor,
+                                       layout, y2, lineH,
+                                       false, true,
+                                       fmtLeft, fmtRight, ls);
+                }
+            }
+        }
+
+        // ── Prior modes in fixed name columns: stacked comparison deltas ──────
+        //
+        //   PB:    +1.23
+        //   Best:  +1.11
+        //
+        private void DrawPriorMiddleStacked(Graphics g, Font labelMainFont, Font valueMainFont,
+                                     MiddleLayout layout, float height,
+                                     float textY, float fontH,
+                                     bool smallStyle,
+                                     StringFormat fmtLeft, StringFormat fmtRight,
+                                     LiveSplit.Options.LayoutSettings ls)
+        {
+            bool twoLines = (_settings.ComparisonCount == 2 && !string.IsNullOrEmpty(_pr_delta2));
+
+            if (!smallStyle)
+            {
+                string label = _cs_cmp1Label + ":";
+                float singleLabelSmallPt = Math.Max(MinSmallFontPt, labelMainFont.Size * SmallFontScale);
+                using (var labelSmallFont = new Font(labelMainFont.FontFamily, singleLabelSmallPt, labelMainFont.Style))
+                {
+                    float lineH = Math.Max(labelSmallFont.GetHeight(g), valueMainFont.GetHeight(g));
+                    float lineY = Math.Max(0f, (height - lineH) / 2f);
+                    DrawLabelValueLine(g, labelSmallFont, valueMainFont,
+                                       label, ComparisonLabelColor(1),
+                                       _pr_delta1, _pr_delta1Color,
+                                       layout, lineY, lineH,
+                                       true, false,
+                                       fmtLeft, fmtRight, ls,
+                                       true);
+                }
+                return;
+            }
+
+            float labelSmallPt = Math.Max(MinSmallFontPt, labelMainFont.Size * SmallFontScale);
+            float valueSmallPt = Math.Max(MinSmallFontPt, valueMainFont.Size * SmallFontScale);
+            using (var labelSmallFont = new Font(labelMainFont.FontFamily, labelSmallPt, labelMainFont.Style))
+            using (var valueSmallFont = new Font(valueMainFont.FontFamily, valueSmallPt, valueMainFont.Style))
+            {
+                float lineH    = Math.Max(labelSmallFont.GetHeight(g), valueSmallFont.GetHeight(g));
+                float lineStep = lineH * 0.68f;
+                float totalH   = twoLines ? lineH + lineStep : lineH;
+                float y1       = (height - totalH) / 2f;
+                float y2       = y1 + lineStep;
+
+                string lbl1 = _cs_cmp1Label + ":";
+
+                DrawLabelValueLine(g, labelSmallFont, valueSmallFont,
+                                   lbl1, ComparisonLabelColor(1),
+                                   _pr_delta1, _pr_delta1Color,
+                                   layout, y1, lineH,
+                                   true, false,
+                                   fmtLeft, fmtRight, ls);
+
+                if (twoLines)
+                {
+                    string lbl2 = _cs_cmp2Label + ":";
+                    DrawLabelValueLine(g, labelSmallFont, valueSmallFont,
+                                       lbl2, ComparisonLabelColor(2),
+                                       _pr_delta2, _pr_delta2Color,
+                                       layout, y2, lineH,
+                                       true, false,
+                                       fmtLeft, fmtRight, ls);
                 }
             }
         }
@@ -850,7 +1990,7 @@ namespace LiveSplit.UI.Components
         //   Font size is NEVER changed here.
         //
         private void DrawPriorMiddle(Graphics g, Font font, Color textColor,
-                              float xMid, float midW, float textY, float fontH,
+                              MiddleLayout layout, float textY, float fontH,
                               StringFormat fmtLeft, StringFormat fmtRight,
                               LiveSplit.Options.LayoutSettings ls)
         {
@@ -871,10 +2011,9 @@ namespace LiveSplit.UI.Components
             string d1Text = _pr_delta1;
             string d2Text = onlyOne ? string.Empty : _pr_delta2;
 
-            // Keep a small safety gap before the right-side time column.
-            // Deltas must never touch or draw underneath the time.
-            const float RightTimeSafeGap = 3f;
-            float usableMidW = Math.Max(0f, midW - RightTimeSafeGap);
+            // The row geometry already keeps the middle column 5px away from
+            // the right-side column, so this block can use the full middle width.
+            float usableMidW = Math.Max(0f, layout.ValueRight - layout.LeftBound);
 
             // Total space: usable middle width minus separator/gaps.
             float gapTotal = hasSep && !onlyOne ? (sepW + deltaGap * 2f) : (onlyOne ? 0f : deltaGap);
@@ -933,11 +2072,7 @@ namespace LiveSplit.UI.Components
             float innerGap    = drawSep ? (sepW + deltaGap * 2f) : (d1W > 0f && d2W > 0f ? deltaGap : 0f);
             float blockW      = d1W + innerGap + d2W;
 
-            // Left-anchor the block immediately after the label column.
-            // Free space appears between the delta block and the right-side time,
-            // not between the label and the deltas.  This keeps the deltas visually
-            // stable even as the right-side time width changes during the run.
-            float blockX = xMid;
+            float blockX = Math.Max(layout.LeftBound, layout.ValueRight - blockW);
 
             float d1X   = blockX;
             float sepX  = blockX + d1W + (drawSep ? deltaGap : 0f);
@@ -970,9 +2105,6 @@ namespace LiveSplit.UI.Components
         //
         // DrawTextWithEffectsClipped: sets a clip region for the given rectangle,
         // then calls DrawTextWithEffects.  Use when text must not overflow a column.
-        //
-        // DrawTextWithEffectsFit: used only in the small PB/Best block, where slight
-        // font scaling is acceptable if the label + time block is too wide.
 
         private static void DrawTextWithEffects(Graphics g, string text, Font font,
                                         Color textColor, RectangleF rect,
@@ -1074,39 +2206,30 @@ namespace LiveSplit.UI.Components
             }
         }
 
-        private static void DrawTextWithEffectsFit(Graphics g, string text, Font baseFont,
+        // Fit is only used for the small Current Split/Seg. comparison block.
+        private static void DrawTextWithEffectsFit(Graphics g, string text, Font font,
                                            Color textColor, RectangleF rect,
                                            StringFormat format,
-                                           LiveSplit.Options.LayoutSettings settings,
-                                           float minFontPt)
+                                           LiveSplit.Options.LayoutSettings settings)
         {
-            if (string.IsNullOrEmpty(text) || baseFont == null) return;
-            if (rect.Width <= 1f) return;
+            if (string.IsNullOrEmpty(text) || font == null || rect.Width <= 1f)
+                return;
 
-            Font  drawFont    = baseFont;
-            bool  disposeFont = false;
-            float availW      = Math.Max(1f, rect.Width - 1f);
-            float measuredW   = g.MeasureString(text, drawFont).Width;
-
-            if (measuredW > availW && drawFont.Size > minFontPt)
+            float naturalW = g.MeasureString(text, font).Width + 1f;
+            if (naturalW <= rect.Width)
             {
-                float scale   = availW / measuredW;
-                float newSize = Math.Max(minFontPt, drawFont.Size * scale);
-                drawFont      = new Font(baseFont.FontFamily, newSize, baseFont.Style);
-                disposeFont   = true;
+                DrawTextWithEffectsClipped(g, text, font, textColor, rect, format, settings);
+                return;
             }
 
-            try
+            float fitPt = Math.Max(MinSmallFontPt, font.Size * rect.Width / naturalW);
+            using (var fitFont = new Font(font.FontFamily, fitPt, font.Style))
             {
-                DrawTextWithEffects(g, text, drawFont, textColor, rect, format, settings);
-            }
-            finally
-            {
-                if (disposeFont) drawFont.Dispose();
+                DrawTextWithEffectsClipped(g, text, fitFont, textColor, rect, format, settings);
             }
         }
 
-        // ── Reflection helper (version-safe property access) ──────────────────
+        // Reflection helper (version-safe property access).
         private static T GetLayoutSetting<T>(LiveSplit.Options.LayoutSettings settings,
                                              string propertyName, T fallback)
         {
@@ -1123,21 +2246,200 @@ namespace LiveSplit.UI.Components
         }
 
         // ── Background ────────────────────────────────────────────────────────
-        private static void DrawBackground(Graphics g,
-                                            LiveSplit.Options.LayoutSettings ls,
-                                            float width, float height)
+        private void DrawBackground(Graphics g, float width, float height)
         {
-            if (ls.BackgroundColor2 == Color.Transparent)
+            if (!_settings.BackgroundEnabled)
+                return;
+
+            if (width <= 0f || height <= 0f)
+                return;
+
+            SplitDetailBackgroundMode mode = _settings.BackgroundMode;
+            bool deltaMode = IsDeltaBackgroundMode(mode);
+            bool plainMode = mode == SplitDetailBackgroundMode.Plain ||
+                             mode == SplitDetailBackgroundMode.PlainWithDeltaColor;
+            bool horizontal = mode == SplitDetailBackgroundMode.Horizontal ||
+                              mode == SplitDetailBackgroundMode.HorizontalWithDeltaColor;
+
+            Color color1 = _settings.BackgroundColor;
+            Color color2 = _settings.BackgroundColor2;
+            Color color3 = _settings.BackgroundColor3;
+            int colorCount = _settings.BackgroundColorCount == 3 ? 3 : 2;
+
+            if (deltaMode)
             {
-                using (var br = new SolidBrush(ls.BackgroundColor))
-                    g.FillRectangle(br, 0, 0, width, height);
+                if (_backgroundDeltaColor.A <= 0)
+                    return;
+
+                Color deltaColor = MakeDeltaBackgroundColor(_backgroundDeltaColor);
+                if (plainMode)
+                {
+                    color1 = Color.FromArgb(_backgroundDeltaColor.A * 7 / 12, deltaColor);
+                    color2 = color1;
+                    color3 = color1;
+                }
+                else if (colorCount == 3)
+                {
+                    color1 = Color.FromArgb(_backgroundDeltaColor.A / 6, deltaColor);
+                    color2 = Color.FromArgb(_backgroundDeltaColor.A * 7 / 12, deltaColor);
+                    color3 = Color.FromArgb(_backgroundDeltaColor.A, deltaColor);
+                }
+                else
+                {
+                    color1 = Color.FromArgb(_backgroundDeltaColor.A / 6, deltaColor);
+                    color2 = Color.FromArgb(_backgroundDeltaColor.A, deltaColor);
+                }
+            }
+
+            if (plainMode)
+            {
+                if (color1.A > 0)
+                {
+                    using (var brush = new SolidBrush(color1))
+                        FillBackground(g, brush, width, height,
+                                       _settings.BackgroundCornerRadius,
+                                       _settings.BackgroundCorners);
+                }
+                return;
+            }
+
+            bool hasVisibleColor = color1.A > 0 || color2.A > 0 || (colorCount == 3 && color3.A > 0);
+            if (!hasVisibleColor)
+                return;
+
+            PointF endPoint = horizontal ? new PointF(width, 0f) : new PointF(0f, height);
+            using (var brush = new LinearGradientBrush(new PointF(0f, 0f), endPoint, color1, colorCount == 3 ? color3 : color2))
+            {
+                if (colorCount == 3)
+                {
+                    brush.InterpolationColors = new ColorBlend
+                    {
+                        Positions = new[] { 0f, 0.5f, 1f },
+                        Colors = new[] { color1, color2, color3 },
+                    };
+                }
+
+                FillBackground(g, brush, width, height,
+                               _settings.BackgroundCornerRadius,
+                               _settings.BackgroundCorners);
+            }
+        }
+
+        private static void FillBackground(Graphics g, Brush brush, float width, float height,
+                                           float radius, SplitDetailBackgroundCorners corners)
+        {
+            if (radius <= 0f)
+            {
+                g.FillRectangle(brush, 0, 0, width, height);
+                return;
+            }
+
+            SmoothingMode oldSmoothing = g.SmoothingMode;
+            try
+            {
+                g.SmoothingMode = SmoothingMode.AntiAlias;
+                using (GraphicsPath path = CreateRoundedRectanglePath(
+                    new RectangleF(0f, 0f, width, height), radius, corners))
+                {
+                    g.FillPath(brush, path);
+                }
+            }
+            finally
+            {
+                g.SmoothingMode = oldSmoothing;
+            }
+        }
+
+        private static GraphicsPath CreateRoundedRectanglePath(RectangleF rect, float radius,
+                                                               SplitDetailBackgroundCorners corners)
+        {
+            GraphicsPath path = new GraphicsPath();
+            float diameter = Math.Min(Math.Min(radius * 2f, rect.Width), rect.Height);
+            if (diameter <= 0f)
+            {
+                path.AddRectangle(rect);
+                path.CloseFigure();
+                return path;
+            }
+
+            bool roundTop = corners == SplitDetailBackgroundCorners.All ||
+                            corners == SplitDetailBackgroundCorners.Top;
+            bool roundBottom = corners == SplitDetailBackgroundCorners.All ||
+                               corners == SplitDetailBackgroundCorners.Bottom;
+
+            path.StartFigure();
+            if (roundTop)
+            {
+                path.AddArc(rect.Left, rect.Top, diameter, diameter, 180f, 90f);
+                path.AddArc(rect.Right - diameter, rect.Top, diameter, diameter, 270f, 90f);
             }
             else
             {
-                using (var br = new LinearGradientBrush(
-                    new PointF(0, 0), new PointF(0, height),
-                    ls.BackgroundColor, ls.BackgroundColor2))
-                    g.FillRectangle(br, 0, 0, width, height);
+                path.AddLine(rect.Left, rect.Top, rect.Right, rect.Top);
+            }
+
+            if (roundBottom)
+            {
+                path.AddLine(rect.Right, roundTop ? rect.Top + diameter : rect.Top,
+                             rect.Right, rect.Bottom - diameter);
+                path.AddArc(rect.Right - diameter, rect.Bottom - diameter, diameter, diameter, 0f, 90f);
+                path.AddArc(rect.Left, rect.Bottom - diameter, diameter, diameter, 90f, 90f);
+            }
+            else
+            {
+                path.AddLine(rect.Right, roundTop ? rect.Top + diameter : rect.Top,
+                             rect.Right, rect.Bottom);
+                path.AddLine(rect.Right, rect.Bottom, rect.Left, rect.Bottom);
+                path.AddLine(rect.Left, rect.Bottom,
+                             rect.Left, roundTop ? rect.Top + diameter : rect.Top);
+            }
+
+            path.CloseFigure();
+            return path;
+        }
+
+        private static bool IsDeltaBackgroundMode(SplitDetailBackgroundMode mode)
+        {
+            return mode == SplitDetailBackgroundMode.PlainWithDeltaColor ||
+                   mode == SplitDetailBackgroundMode.VerticalWithDeltaColor ||
+                   mode == SplitDetailBackgroundMode.HorizontalWithDeltaColor;
+        }
+
+        private static Color MakeDeltaBackgroundColor(Color deltaColor)
+        {
+            ToHsv(deltaColor, out double hue, out double saturation, out double value);
+            return FromHsv(hue, saturation * 0.5, value * 0.25);
+        }
+
+        private static void ToHsv(Color color, out double hue, out double saturation, out double value)
+        {
+            int max = Math.Max(color.R, Math.Max(color.G, color.B));
+            int min = Math.Min(color.R, Math.Min(color.G, color.B));
+
+            hue = color.GetHue();
+            saturation = max == 0 ? 0d : 1d - (1d * min / max);
+            value = max / 255d;
+        }
+
+        private static Color FromHsv(double hue, double saturation, double value)
+        {
+            int hi = Convert.ToInt32(Math.Floor(hue / 60d)) % 6;
+            double f = hue / 60d - Math.Floor(hue / 60d);
+
+            value *= 255d;
+            int v = Convert.ToInt32(value);
+            int p = Convert.ToInt32(value * (1d - saturation));
+            int q = Convert.ToInt32(value * (1d - f * saturation));
+            int t = Convert.ToInt32(value * (1d - (1d - f) * saturation));
+
+            switch (hi)
+            {
+                case 0: return Color.FromArgb(255, v, t, p);
+                case 1: return Color.FromArgb(255, q, v, p);
+                case 2: return Color.FromArgb(255, p, v, t);
+                case 3: return Color.FromArgb(255, p, q, v);
+                case 4: return Color.FromArgb(255, t, p, v);
+                default: return Color.FromArgb(255, v, p, q);
             }
         }
 
@@ -1252,13 +2554,34 @@ namespace LiveSplit.UI.Components
         }
 
         private static string ShortenLabelToFit(Graphics g, string text, Font font,
-                                                float maxWidth)
+                                                float maxWidth,
+                                                SplitDetailNameShortening shortening)
         {
             if (string.IsNullOrEmpty(text)) return string.Empty;
             if (maxWidth <= 1f) return string.Empty;
             if (g.MeasureString(text, font).Width <= maxWidth) return text;
 
+            if (shortening == SplitDetailNameShortening.RemoveLeadingParts)
+                return ShortenByRemovingLeadingParts(g, text, font, maxWidth);
+
             return EllipsizeEndToFit(g, text, font, maxWidth);
+        }
+
+        private static string ShortenByRemovingLeadingParts(Graphics g, string text,
+                                                            Font font, float maxWidth)
+        {
+            string[] parts = text.Split((char[])null, StringSplitOptions.RemoveEmptyEntries);
+            if (parts.Length <= 1)
+                return EllipsizeEndToFit(g, text, font, maxWidth);
+
+            for (int start = 1; start < parts.Length; start++)
+            {
+                string candidate = string.Join(" ", parts, start, parts.Length - start);
+                if (g.MeasureString(candidate, font).Width <= maxWidth)
+                    return candidate;
+            }
+
+            return EllipsizeEndToFit(g, parts[parts.Length - 1], font, maxWidth);
         }
 
         private static string EllipsizeEndToFit(Graphics g, string text, Font font, float maxWidth)
@@ -1435,13 +2758,24 @@ namespace LiveSplit.UI.Components
             Color fallback = delta.Value.Ticks > 0
                 ? state.LayoutSettings.BehindLosingTimeColor
                 : state.LayoutSettings.AheadGainingTimeColor;
-            return ComparisonColor(comparisonIndex, fallback);
+            return DeltaOverrideColor(comparisonIndex, fallback);
         }
 
-        private Color ComparisonColor(int comparisonIndex, Color fallback)
+        private Color ComparisonLabelColor(int comparisonIndex)
         {
-            if (comparisonIndex == 1 && _settings.OverrideComparison1Color) return _settings.Comparison1Color;
-            if (comparisonIndex == 2 && _settings.OverrideComparison2Color) return _settings.Comparison2Color;
+            if (comparisonIndex == 1 && _settings.OverrideComparison1Color)
+                return _settings.Comparison1Color;
+            if (comparisonIndex == 2 && _settings.OverrideComparison2Color)
+                return _settings.Comparison2Color;
+            return Color.White;
+        }
+
+        private Color DeltaOverrideColor(int comparisonIndex, Color fallback)
+        {
+            if (comparisonIndex == 1 && _settings.OverrideDelta1Color)
+                return _settings.Delta1Color;
+            if (comparisonIndex == 2 && _settings.OverrideDelta2Color)
+                return _settings.Delta2Color;
             return fallback;
         }
 
@@ -1450,6 +2784,7 @@ namespace LiveSplit.UI.Components
             switch (comparison)
             {
                 case "Best Segments":    return "Best";
+                case "Best Pace":        return "Pace";
                 case "Personal Best":    return "PB";
                 case "Average Segments": return "Avg";
                 case "Balanced PB":      return "Bal";

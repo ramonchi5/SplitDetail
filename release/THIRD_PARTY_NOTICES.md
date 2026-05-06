@@ -13,19 +13,19 @@ Copyright (c) 2013 Christopher Serr and Sergey Papushin.
 Official repository: https://github.com/LiveSplit/LiveSplit  
 License: https://github.com/LiveSplit/LiveSplit/blob/master/LICENSE
 
-## Alternative Detailed Timer
+## Alternative Timer
 
-Some SplitDetail releases may include `LiveSplit.AlternativeDetailedTimer.dll`, an unofficial modified build of LiveSplit's Detailed Timer component intended to pair with SplitDetail.
+SplitDetail is designed to pair well with the separate `LiveSplit.AlternativeTimer.dll` component.
 
-Original component repository: https://github.com/LiveSplit/LiveSplit.DetailedTimer
+Alternative Timer repository: https://github.com/ramonchi5/AlternativeTimer
 
-The modified build removes the segment timer / segment comparison area, keeps the main run timer and current split name, and changes the component identity to avoid presenting itself as the official Detailed Timer component.
+Alternative Timer is based on LiveSplit's Detailed Timer, removes the segment timer / segment comparison area, keeps the main run timer and current split name, and can display a leading segment counter from names such as `1/5 Gourd`.
 
 LiveSplit and LiveSplit.DetailedTimer are licensed under the MIT License.
 
 Copyright (c) 2013 Christopher Serr and Sergey Papushin.
 
-This modified DLL is not an official LiveSplit release.
+Alternative Timer is not an official LiveSplit release and is not distributed inside the SplitDetail release package.
 
 ## LiveSplit.Core.dll
 

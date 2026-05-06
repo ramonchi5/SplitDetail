@@ -1,8 +1,8 @@
-# SplitDetail — LiveSplit Component
+# SplitDetail - LiveSplit Component
 
 SplitDetail is a compact, subsplit-aware LiveSplit component that shows timing details for the current split group, current segment/subsplit, previous split group, or previous segment/subsplit.
 
-It is designed for runners who use Subsplits and want cleaner timing information than LiveSplit’s default Detailed Timer / Previous Segment combination can provide.
+It is designed for runners who use Subsplits and want cleaner timing information than LiveSplit's default Detailed Timer / Previous Segment combination can provide.
 
 ---
 
@@ -54,12 +54,16 @@ You can also use only one instance, for example as a more configurable replaceme
 - Fully selectable comparisons, including custom LiveSplit comparisons.
 - Priority delta setting for tight layouts.
 - Optional separator between deltas.
-- Configurable internal column spacing.
+- Configurable middle-column position.
+- Optional per-instance plain, vertical, horizontal, and delta-colored backgrounds.
+- Optional rounded background corners.
+- Fixed three-column layout for split/segment names, with optional auto-fit behavior.
 - Configurable accuracy: seconds, tenths, hundredths, milliseconds.
 - Automatic cleanup for Subsplits names when using split/segment names.
 - Compact shortening behavior for large deltas.
 - Gold delta coloring for new bests.
 - LiveSplit-style text shadows and outlines.
+- Bold controls for the left, middle, and right columns.
 - Dynamic Layout Editor names, such as `Split Detail - Current Split` and `Split Detail - Current Seg.`.
 - Appears under `Information` in the Layout Editor component picker.
 
@@ -73,7 +77,10 @@ You can also use only one instance, for example as a more configurable replaceme
 |---|---:|---|
 | **Mode** | `Current Split` | Chooses what this instance displays. |
 | **Label** | mode default | Label used by the selected mode. Previous modes switch the prefix to `Live` while showing live data unless split/segment names are enabled. |
-| **Use split/seg. name** | off | Use the active or previous split/segment name instead of the custom label. Segment names drop leading `{Group}` tags and `-`; split names like `{Tutorial}5/5 Genji` display as `Tutorial`. |
+| **Use split/subsplit name** | off | Use the active or previous split/subsplit name instead of the custom label. Subsplit names drop leading `{Group}` tags and `-`; split names like `{Tutorial}5/5 Genji` display as `Tutorial`. |
+| **Full size comparison/delta** | off | When enabled, split/subsplit names use automatic column sizing so comparison and delta text keeps more room. When off, names use fixed thirds: name, comparison block, time. |
+| **Abbreviation method** | `End ellipsis` | Choose how names shorten when they do not fit: add `...` at the end, or remove leading parts one by one before ellipsis. |
+| **Always remove leading numbers** | off | Removes leading numbered name parts such as `2/5` whenever split/subsplit names are shown, even when the name already fits. |
 
 The mode menu uses full names, such as `Previous Segment`, while the default row labels stay compact, such as `Prev Seg.`.
 
@@ -81,7 +88,7 @@ The mode menu uses full names, such as `Previous Segment`, while the default row
 
 | Setting | Default | Description |
 |---|---:|---|
-| **Comparison 1** | `Personal Best` | First comparison used for Current mode values and prior/live deltas. |
+| **Comparison 1** | `Current Comparison` | First comparison used for Current mode values and prior/live deltas. `Current Comparison` follows LiveSplit's active comparison if the runner changes it. |
 | **Comparison 2** | `Best Segments` | Second comparison used when showing two comparisons. |
 | **Show comparisons** | `2 (both)` | Choose one or two comparison values/deltas. |
 | **Priority delta** | `Comparison 2` | Which delta is preserved first when horizontal space is tight. |
@@ -93,14 +100,16 @@ Comparison choices are read from the active run, so custom comparisons can be us
 | Setting | Default | Description |
 |---|---:|---|
 | **Separator** | empty | Optional separator between deltas. Empty means no separator. |
-| **Column spacing (px)** | `3` | Gap between the label column and delta block. This does not change outer padding, vertical height, or internal delta/separator spacing. |
+| **Move Middle Column** | `5` | Moves the comparison/delta area to the right. In fixed name columns, this is left padding inside the middle column and can move up to the safe gap before the right-side time value. |
+| **Background Color** | disabled, transparent plain | Adds a component background when enabled. Gradients can use 2 or 3 colors. Delta modes use LiveSplit's current comparison for the color. |
+| **Radius** | `0` | Rounds the component background corners. Can apply to all, top, or bottom corners. |
 
 Examples:
 
 ```text
 Separator empty: +1.21 +1.11
 Separator |:     +1.21 | +1.11
-Separator ·:     +1.21 · +1.11
+Separator dot:   +1.21 . +1.11
 ```
 
 ### Accuracy
@@ -115,9 +124,9 @@ Separator ·:     +1.21 · +1.11
 When space is tight, SplitDetail shortens values while keeping them readable. For example:
 
 ```text
-+57.530 → +57.53 → +57.5 → +57
-+3:11   → +3m
-+1:02:30 → +1h
++57.530 -> +57.53 -> +57.5 -> +57
++3:11   -> +3m
++1:02:30 -> +1h
 ```
 
 It avoids unreadable forms such as `+3:` or a lone `+`.
@@ -127,22 +136,32 @@ It avoids unreadable forms such as `+3:` or a lone `+`.
 | Setting | Description |
 |---|---|
 | **Text Color** | Label color. |
-| **Time Color** | Right-side time and Current mode comparison value color when no comparison-specific color is enabled. |
-| **Comparison 1** | Optional custom color for the first Current mode comparison line and first prior/live delta. |
-| **Comparison 2** | Optional custom color for the second Current mode comparison line and second prior/live delta. |
+| **Time Color** | Right-side time and Current mode comparison value color. |
+| **Comparison 1** | Optional custom color for the first comparison label, such as `PB:`. |
+| **Comparison 2** | Optional custom color for the second comparison label, such as `Best:`. |
+| **Delta 1** | Optional custom color for the first prior/live delta. |
+| **Delta 2** | Optional custom color for the second prior/live delta. |
 
-Delta colors follow LiveSplit’s ahead/behind colors unless a comparison-specific color is enabled. Gold deltas still use the layout’s gold/best-segment color where available.
+Delta colors follow LiveSplit's ahead/behind colors unless a delta-specific color is enabled. Gold deltas still use the layout's gold/best-segment color where available.
+
+### Font
+
+| Setting | Description |
+|---|---|
+| **Left bold** | Toggles bold for the label or split-name column. |
+| **Middle bold** | Toggles bold for the comparison/delta column. |
+| **Right bold** | Toggles bold for the timer/value column. |
 
 ---
 
 ## Subsplits convention
 
-SplitDetail detects subsplit groups using the same naming convention as LiveSplit’s Subsplits component:
+SplitDetail detects subsplit groups using the same naming convention as LiveSplit's Subsplits component:
 
 ```text
--Room 1      ← child subsplit
--Room 2      ← child subsplit
-Castle       ← parent split group/header
+-Room 1      <- child subsplit
+-Room 2      <- child subsplit
+Castle       <- parent split group/header
 ```
 
 A child subsplit starts with `-`. The parent/header does not.
@@ -168,18 +187,18 @@ bin\Release\LiveSplit.SplitDetail.dll
 
 into your LiveSplit `Components` folder.
 
-3. Optional, but recommended for the full SplitDetail layout: copy the companion timer DLL:
+3. Optional, but recommended for the full SplitDetail layout: install the separate companion timer:
 
 ```text
-LiveSplit.AlternativeDetailedTimer.dll
+LiveSplit.AlternativeTimer.dll
 ```
 
-into the same LiveSplit `Components` folder. This is an unofficial modified build of LiveSplit's Detailed Timer that removes the segment timer area and keeps the run timer plus current split name.
+into the same LiveSplit `Components` folder. Alternative Timer removes the segment timer area, keeps the run timer plus current split name, and can display a leading `1/5` segment counter as a separate label.
 
 4. Restart LiveSplit.
 5. Open **Layout Editor**.
 6. Add `Split Detail` from `Information`.
-7. If using the companion timer, add `Alternative Detailed Timer` from `Timer`.
+7. If using the companion timer, add `Alternative Timer` from `Timer`.
 
 ---
 
@@ -189,7 +208,7 @@ into the same LiveSplit `Components` folder. This is an unofficial modified buil
 
 - Visual Studio 2022 recommended.
 - .NET Framework 4.8 Developer Pack.
-- LiveSplit installed, or the required LiveSplit DLL references available in the project’s `packages` folder.
+- LiveSplit installed, or the required LiveSplit DLL references available in the project's `packages` folder.
 
 ### Steps
 
@@ -198,12 +217,12 @@ into the same LiveSplit `Components` folder. This is an unofficial modified buil
    - `LiveSplit.Core.dll`
    - `UpdateManager.dll`
 3. Build in **Release** mode.
-4. Copy `LiveSplit.SplitDetail.dll` to LiveSplit’s `Components` folder.
+4. Copy `LiveSplit.SplitDetail.dll` to LiveSplit's `Components` folder.
 
 If references do not resolve automatically, add them manually through:
 
 ```text
-References → Add Reference → Browse
+References -> Add Reference -> Browse
 ```
 
 and select the DLLs from your LiveSplit installation or local `packages` folder.
@@ -248,7 +267,7 @@ Before publishing a new build, test:
 - Two-comparison mode.
 - Priority Delta = Comparison 1.
 - Priority Delta = Comparison 2.
-- Separators empty, `|`, `/`, and `·`.
+- Separators empty, `|`, `/`, and dot.
 - Accuracy: seconds, tenths, hundredths, milliseconds.
 - Runs with no subsplits.
 - Runs with multiple subsplits per parent group.
@@ -266,7 +285,7 @@ LiveSplit is licensed under the MIT License. Copyright (c) 2013 Christopher Serr
 
 Some implementation patterns, including component structure, comparison handling, layout settings integration, and rendering behavior, were developed with reference to LiveSplit and existing LiveSplit components.
 
-Some releases may also include `LiveSplit.AlternativeDetailedTimer.dll`, an unofficial modified build of LiveSplit's Detailed Timer component. It is provided as an optional companion for SplitDetail and is not an official LiveSplit release.
+Alternative Timer is maintained separately at https://github.com/ramonchi5/AlternativeTimer and is the recommended optional companion for SplitDetail. It is not an official LiveSplit release.
 
 For more details, see [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).
 
